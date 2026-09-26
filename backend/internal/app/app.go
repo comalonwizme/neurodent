@@ -51,11 +51,12 @@ func New(cfg config.Config, logOut io.Writer) (a *App, err error) {
 
 	a.probe = health.NewProbe()
 
-	// Маршруты видны в одном месте. Паттерн с методом даёт 405 + Allow
-	// на чужой метод; GET также обслуживает HEAD.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", a.probe.Liveness)
-	mux.HandleFunc("GET /readyz", a.probe.Readiness)
+	registerRoutes(mux, a.probe)
+	handler := newRouter(mux, a.log, routerOptions{
+		handlerTimeout: cfg.HandlerTimeout,
+		hsts:           cfg.Env != config.EnvDev,
+	})
 
 	a.server = httpserver.New(httpserver.Options{
 		Addr:              cfg.HTTPAddr,
@@ -64,7 +65,7 @@ func New(cfg config.Config, logOut io.Writer) (a *App, err error) {
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       cfg.IdleTimeout,
 		ShutdownTimeout:   cfg.ShutdownTimeout,
-	}, mux, a.log)
+	}, handler, a.log)
 
 	return a, nil
 }
