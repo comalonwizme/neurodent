@@ -30,6 +30,7 @@ const (
 	keyReadHeaderTimeout = "NEURODENT_READ_HEADER_TIMEOUT"
 	keyReadTimeout       = "NEURODENT_READ_TIMEOUT"
 	keyWriteTimeout      = "NEURODENT_WRITE_TIMEOUT"
+	keyHandlerTimeout    = "NEURODENT_HANDLER_TIMEOUT"
 	keyIdleTimeout       = "NEURODENT_IDLE_TIMEOUT"
 	keyShutdownTimeout   = "NEURODENT_SHUTDOWN_TIMEOUT"
 	keyDrainDelay        = "NEURODENT_DRAIN_DELAY"
@@ -67,9 +68,16 @@ const (
 	// Заголовки + тело. 1 МБ на ~1 Мбит/с аплинка (слабый 3G) ≈ 8s; 15s — с запасом.
 	defaultReadTimeout = 15 * time.Second
 
-	// Хендлер + запись ответа. Timeout-middleware (шаг 0.3) будет ~10s — меньше
+	// Хендлер + запись ответа. Timeout-middleware (HandlerTimeout, 10s) меньше
 	// этого значения, чтобы клиент получил нормальный 503, а не оборванное соединение.
 	defaultWriteTimeout = 15 * time.Second
+
+	// Бюджет хендлера в timeout-middleware. Строго меньше WriteTimeout: после
+	// таймаута middleware ещё должен успеть записать 503 до дедлайна соединения.
+	// 10s: JSON-эндпоинт, которому нужно больше, делает что-то не то (долгие
+	// операции уходят в фон через очередь); 5s запаса до WriteTimeout хватает
+	// на запись problem-ответа даже медленному клиенту.
+	defaultHandlerTimeout = 10 * time.Second
 
 	// Должен быть БОЛЬШЕ idle-таймаута балансировщика (AWS ALB — 60s, nginx
 	// keepalive_timeout — 75s). Если мы закроем keep-alive раньше LB, он может
@@ -104,6 +112,7 @@ type Config struct {
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
+	HandlerTimeout    time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
 	DrainDelay        time.Duration
@@ -120,6 +129,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("read_header_timeout", c.ReadHeaderTimeout),
 		slog.Duration("read_timeout", c.ReadTimeout),
 		slog.Duration("write_timeout", c.WriteTimeout),
+		slog.Duration("handler_timeout", c.HandlerTimeout),
 		slog.Duration("idle_timeout", c.IdleTimeout),
 		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
 		slog.Duration("drain_delay", c.DrainDelay),
@@ -143,6 +153,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	rht, rhtOK := l.duration(keyReadHeaderTimeout, defaultReadHeaderTimeout, bounds{time.Second, 10 * time.Second})
 	rt, rtOK := l.duration(keyReadTimeout, defaultReadTimeout, bounds{time.Second, time.Minute})
 	wt, wtOK := l.duration(keyWriteTimeout, defaultWriteTimeout, bounds{time.Second, time.Minute})
+	ht, htOK := l.duration(keyHandlerTimeout, defaultHandlerTimeout, bounds{time.Second, time.Minute})
 	it, _ := l.duration(keyIdleTimeout, defaultIdleTimeout, bounds{10 * time.Second, 5 * time.Minute})
 	st, stOK := l.duration(keyShutdownTimeout, defaultShutdownTimeout, bounds{time.Second, stopBudget})
 
@@ -158,6 +169,9 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	// Иначе одна опечатка порождает каскад ложных ошибок про соседние поля.
 	if rhtOK && rtOK && rht > rt {
 		l.fail(keyReadHeaderTimeout, fmt.Errorf("must be <= %s", keyReadTimeout))
+	}
+	if htOK && wtOK && ht >= wt {
+		l.fail(keyHandlerTimeout, fmt.Errorf("must be < %s, otherwise the connection is cut before the 503 is written", keyWriteTimeout))
 	}
 	if stOK && wtOK && st < wt {
 		l.fail(keyShutdownTimeout, fmt.Errorf("must be >= %s, otherwise in-flight requests are cut", keyWriteTimeout))
@@ -179,6 +193,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		ReadHeaderTimeout: rht,
 		ReadTimeout:       rt,
 		WriteTimeout:      wt,
+		HandlerTimeout:    ht,
 		IdleTimeout:       it,
 		ShutdownTimeout:   st,
 		DrainDelay:        dd,

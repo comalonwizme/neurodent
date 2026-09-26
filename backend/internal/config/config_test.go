@@ -48,6 +48,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       15 * time.Second,
 				WriteTimeout:      15 * time.Second,
+				HandlerTimeout:    10 * time.Second,
 				IdleTimeout:       120 * time.Second,
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        0,
@@ -63,6 +64,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       15 * time.Second,
 				WriteTimeout:      15 * time.Second,
+				HandlerTimeout:    10 * time.Second,
 				IdleTimeout:       120 * time.Second,
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        2 * time.Second,
@@ -78,6 +80,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       15 * time.Second,
 				WriteTimeout:      15 * time.Second,
+				HandlerTimeout:    10 * time.Second,
 				IdleTimeout:       120 * time.Second,
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        2 * time.Second,
@@ -92,6 +95,7 @@ func TestLoad_Valid(t *testing.T) {
 				"NEURODENT_READ_HEADER_TIMEOUT": "2s",
 				"NEURODENT_READ_TIMEOUT":        "30s",
 				"NEURODENT_WRITE_TIMEOUT":       "20s",
+				"NEURODENT_HANDLER_TIMEOUT":     "8s",
 				"NEURODENT_IDLE_TIMEOUT":        "90s",
 				"NEURODENT_SHUTDOWN_TIMEOUT":    "20s",
 				"NEURODENT_DRAIN_DELAY":         "3s",
@@ -103,6 +107,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 2 * time.Second,
 				ReadTimeout:       30 * time.Second,
 				WriteTimeout:      20 * time.Second,
+				HandlerTimeout:    8 * time.Second,
 				IdleTimeout:       90 * time.Second,
 				ShutdownTimeout:   20 * time.Second,
 				DrainDelay:        3 * time.Second,
@@ -110,14 +115,17 @@ func TestLoad_Valid(t *testing.T) {
 			},
 		},
 		{
-			name: "all ranges at min",
+			// HANDLER < WRITE, поэтому WRITE = 1s в валидном конфиге недостижим:
+			// берём ближайшее допустимое значение (min для WRITE — в TestLoad_Errors).
+			name: "all ranges at min, write just above handler",
 			env: withEnv(
 				"NEURODENT_HTTP_ADDR", ":1",
 				"NEURODENT_READ_HEADER_TIMEOUT", "1s",
 				"NEURODENT_READ_TIMEOUT", "1s",
-				"NEURODENT_WRITE_TIMEOUT", "1s",
+				"NEURODENT_WRITE_TIMEOUT", "1001ms",
+				"NEURODENT_HANDLER_TIMEOUT", "1s",
 				"NEURODENT_IDLE_TIMEOUT", "10s",
-				"NEURODENT_SHUTDOWN_TIMEOUT", "1s",
+				"NEURODENT_SHUTDOWN_TIMEOUT", "1001ms",
 				"NEURODENT_DRAIN_DELAY", "0s",
 			),
 			want: Config{
@@ -125,9 +133,10 @@ func TestLoad_Valid(t *testing.T) {
 				HTTPAddr:          ":1",
 				ReadHeaderTimeout: 1 * time.Second,
 				ReadTimeout:       1 * time.Second,
-				WriteTimeout:      1 * time.Second,
+				WriteTimeout:      1001 * time.Millisecond,
+				HandlerTimeout:    1 * time.Second,
 				IdleTimeout:       10 * time.Second,
-				ShutdownTimeout:   1 * time.Second,
+				ShutdownTimeout:   1001 * time.Millisecond,
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
 			},
@@ -149,6 +158,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout:       time.Minute,
 				WriteTimeout:      15 * time.Second,
+				HandlerTimeout:    10 * time.Second,
 				IdleTimeout:       5 * time.Minute,
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        10 * time.Second,
@@ -168,6 +178,7 @@ func TestLoad_Valid(t *testing.T) {
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       15 * time.Second,
 				WriteTimeout:      25 * time.Second,
+				HandlerTimeout:    10 * time.Second,
 				IdleTimeout:       120 * time.Second,
 				ShutdownTimeout:   25 * time.Second,
 				DrainDelay:        0,
@@ -324,7 +335,44 @@ func TestLoad_Errors(t *testing.T) {
 			wantKeys: []string{"NEURODENT_DRAIN_DELAY"},
 		},
 
+		{
+			name:     "handler timeout just above max",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "60001ms"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
+		{
+			name:     "handler timeout just below min",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "999ms"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
+		{
+			name:      "empty handler timeout",
+			env:       withEnv("NEURODENT_HANDLER_TIMEOUT", ""),
+			wantKeys:  []string{"NEURODENT_HANDLER_TIMEOUT"},
+			wantEmpty: true,
+		},
+		{
+			name:     "broken handler timeout does not cascade",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "5x"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
+
 		// Кросс-полевые инварианты.
+		{
+			name:     "handler timeout equal to write",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "15s"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
+		{
+			name:     "handler timeout at max is in range but not below write",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "1m"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
+		{
+			name:     "write at min is in range but not above handler",
+			env:      withEnv("NEURODENT_WRITE_TIMEOUT", "1s", "NEURODENT_HANDLER_TIMEOUT", "1s"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
+		},
 		{
 			name:     "read header timeout greater than read timeout",
 			env:      withEnv("NEURODENT_READ_HEADER_TIMEOUT", "10s", "NEURODENT_READ_TIMEOUT", "5s"),
@@ -448,6 +496,7 @@ func TestConfig_LogValue(t *testing.T) {
 	want := []string{
 		"drain_delay",
 		"env",
+		"handler_timeout",
 		"http_addr",
 		"idle_timeout",
 		"log_level",
@@ -468,17 +517,18 @@ func TestConfig_LogValue(t *testing.T) {
 // FuzzLoad: load не паникует, а успешный результат всегда удовлетворяет
 // инвариантам. Инварианты записаны литералами, независимо от config.go.
 func FuzzLoad(f *testing.F) {
-	f.Add("staging", "5s", "15s", "15s", "15s", "2s")
-	f.Add("dev", "10s", "1m", "1m", "25s", "0s")
-	f.Add("prod", "1s", "1s", "1s", "1s", "10s")
-	f.Add("staging", "5x", "", "-1s", "25s", "10h")
+	f.Add("staging", "5s", "15s", "15s", "10s", "15s", "2s")
+	f.Add("dev", "10s", "1m", "1m", "1m", "25s", "0s")
+	f.Add("prod", "1s", "1s", "1001ms", "1s", "1001ms", "10s")
+	f.Add("staging", "5x", "", "-1s", "", "25s", "10h")
 
-	f.Fuzz(func(t *testing.T, env, rht, rt, wt, st, dd string) {
+	f.Fuzz(func(t *testing.T, env, rht, rt, wt, ht, st, dd string) {
 		cfg, err := load(lookupFrom(map[string]string{
 			"NEURODENT_ENV":                 env,
 			"NEURODENT_READ_HEADER_TIMEOUT": rht,
 			"NEURODENT_READ_TIMEOUT":        rt,
 			"NEURODENT_WRITE_TIMEOUT":       wt,
+			"NEURODENT_HANDLER_TIMEOUT":     ht,
 			"NEURODENT_SHUTDOWN_TIMEOUT":    st,
 			"NEURODENT_DRAIN_DELAY":         dd,
 		}))
@@ -494,11 +544,15 @@ func FuzzLoad(f *testing.F) {
 		in("ReadHeaderTimeout", cfg.ReadHeaderTimeout, time.Second, 10*time.Second)
 		in("ReadTimeout", cfg.ReadTimeout, time.Second, time.Minute)
 		in("WriteTimeout", cfg.WriteTimeout, time.Second, time.Minute)
+		in("HandlerTimeout", cfg.HandlerTimeout, time.Second, time.Minute)
 		in("ShutdownTimeout", cfg.ShutdownTimeout, time.Second, 25*time.Second)
 		in("DrainDelay", cfg.DrainDelay, 0, 10*time.Second)
 
 		if cfg.ReadHeaderTimeout > cfg.ReadTimeout {
 			t.Errorf("ReadHeaderTimeout %s > ReadTimeout %s", cfg.ReadHeaderTimeout, cfg.ReadTimeout)
+		}
+		if cfg.HandlerTimeout >= cfg.WriteTimeout {
+			t.Errorf("HandlerTimeout %s >= WriteTimeout %s", cfg.HandlerTimeout, cfg.WriteTimeout)
 		}
 		if cfg.ShutdownTimeout < cfg.WriteTimeout {
 			t.Errorf("ShutdownTimeout %s < WriteTimeout %s", cfg.ShutdownTimeout, cfg.WriteTimeout)
