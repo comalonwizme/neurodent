@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -35,6 +36,14 @@ const (
 	keyShutdownTimeout   = "NEURODENT_SHUTDOWN_TIMEOUT"
 	keyDrainDelay        = "NEURODENT_DRAIN_DELAY"
 	keyLogLevel          = "NEURODENT_LOG_LEVEL"
+
+	keyDBDSN              = "NEURODENT_DB_DSN"
+	keyDBMaxConns         = "NEURODENT_DB_MAX_CONNS"
+	keyDBConnectTimeout   = "NEURODENT_DB_CONNECT_TIMEOUT"
+	keyDBStatementTimeout = "NEURODENT_DB_STATEMENT_TIMEOUT"
+	keyDBMaxConnLifetime  = "NEURODENT_DB_MAX_CONN_LIFETIME"
+
+	keyMigrateDSN = "NEURODENT_MIGRATE_DSN"
 )
 
 // Бюджет остановки процесса.
@@ -94,6 +103,27 @@ const (
 	defaultDrainDelayDev = 0
 
 	defaultLogLevel = "info"
+
+	// Пул на процесс. max_connections в Postgres по умолчанию 100, и каждое
+	// соединение — отдельный процесс с памятью. 10 на реплику API оставляет
+	// место для нескольких реплик, мигратора, мониторинга и админского доступа.
+	// Хендлер держит соединение только на время транзакции, 10 параллельных
+	// транзакций — сотни RPS для коротких запросов.
+	defaultDBMaxConns = 10
+
+	// Установка соединения внутри региона — миллисекунды, TLS + SCRAM под
+	// нагрузкой — сотни. 5s ловят недоступную БД на старте, не подвешивая его.
+	defaultDBConnectTimeout = 5 * time.Second
+
+	// statement_timeout на стороне Postgres. Меньше HandlerTimeout (инвариант):
+	// запрос, который переживёт хендлер, — работа впустую, держащая соединение
+	// и блокировки. OLTP-запрос дольше 5s — баг или отсутствующий индекс.
+	defaultDBStatementTimeout = 5 * time.Second
+
+	// Соединения пересоздаются: после failover (новый primary за тем же DNS),
+	// ротации паролей и чтобы backend-процессы не копили память. 30m — ротация
+	// заметна за время одного деплоя и не создаёт шторма переподключений.
+	defaultDBMaxConnLifetime = 30 * time.Minute
 )
 
 // bounds — допустимый диапазон для duration-переменной. Верхняя граница ловит
@@ -103,6 +133,38 @@ type bounds struct{ min, max time.Duration }
 // errEmpty — sentinel-ошибка. Единственное допустимое исключение из правила
 // «без глобальных переменных»: её никто не изменяет (как io.EOF в stdlib).
 var errEmpty = errors.New("set but empty")
+
+// redacted — то, что видят fmt, slog и json вместо секрета.
+const redacted = "[REDACTED]"
+
+// Secret — строка, которая не печатается: fmt (любой глагол), slog и
+// encoding/json видят "[REDACTED]". Значение достаётся только явным вызовом
+// Reveal — его легко найти grep'ом при ревью.
+//
+// Структура, а не type Secret string: конверсия string(secret) в обход
+// Reveal не компилируется.
+type Secret struct{ v string }
+
+// Format реализует fmt.Formatter. String и GoString недостаточно: для %d,
+// %o и т.п. fmt их не вызывает и печатает поля структуры через reflection —
+// вместе со значением (это поймал TestSecret_NeverPrinted).
+func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
+
+// Reveal возвращает значение секрета. Вызывать только там, где значение
+// передаётся потребителю (драйверу БД), и никогда — для логов и ошибок.
+func (s Secret) Reveal() string { return s.v }
+
+// String реализует fmt.Stringer.
+func (Secret) String() string { return redacted }
+
+// GoString реализует fmt.GoStringer (%#v).
+func (Secret) GoString() string { return redacted }
+
+// LogValue реализует slog.LogValuer.
+func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
+
+// MarshalText реализует encoding.TextMarshaler (json, xml).
+func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
 
 // Config — значение, а не указатель: после Load() он иммутабелен
 // и передаётся копией.
@@ -117,6 +179,12 @@ type Config struct {
 	ShutdownTimeout   time.Duration
 	DrainDelay        time.Duration
 	LogLevel          slog.Level
+
+	DBDSN              Secret // не логируется даже через LogValue
+	DBMaxConns         int32
+	DBConnectTimeout   time.Duration
+	DBStatementTimeout time.Duration
+	DBMaxConnLifetime  time.Duration
 }
 
 // LogValue реализует slog.LogValuer по принципу allowlist: в лог попадают
@@ -134,6 +202,10 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
 		slog.Duration("drain_delay", c.DrainDelay),
 		slog.String("log_level", c.LogLevel.String()),
+		slog.Int("db_max_conns", int(c.DBMaxConns)),
+		slog.Duration("db_connect_timeout", c.DBConnectTimeout),
+		slog.Duration("db_statement_timeout", c.DBStatementTimeout),
+		slog.Duration("db_max_conn_lifetime", c.DBMaxConnLifetime),
 	)
 }
 
@@ -165,6 +237,12 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 
 	lvl, lvlOK := l.logLevel(keyLogLevel, defaultLogLevel)
 
+	dsn, _ := l.secret(keyDBDSN)
+	maxConns, _ := l.intRange(keyDBMaxConns, defaultDBMaxConns, 1, 100)
+	dbct, _ := l.duration(keyDBConnectTimeout, defaultDBConnectTimeout, bounds{time.Second, 30 * time.Second})
+	dbst, dbstOK := l.duration(keyDBStatementTimeout, defaultDBStatementTimeout, bounds{100 * time.Millisecond, time.Minute})
+	dblt, _ := l.duration(keyDBMaxConnLifetime, defaultDBMaxConnLifetime, bounds{time.Minute, 24 * time.Hour})
+
 	// Этап 2: кросс-полевые инварианты — только если все участники валидны.
 	// Иначе одна опечатка порождает каскад ложных ошибок про соседние поля.
 	if rhtOK && rtOK && rht > rt {
@@ -178,6 +256,9 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if stOK && ddOK && st+dd > stopBudget {
 		l.fail(keyShutdownTimeout, fmt.Errorf("%s + %s must be <= %s (orchestrator grace period minus close reserve)", keyShutdownTimeout, keyDrainDelay, stopBudget))
+	}
+	if dbstOK && htOK && dbst >= ht {
+		l.fail(keyDBStatementTimeout, fmt.Errorf("must be < %s: a query that outlives the handler is wasted work holding a connection", keyHandlerTimeout))
 	}
 	if envOK && lvlOK && env == EnvProd && lvl < slog.LevelInfo {
 		l.fail(keyLogLevel, errors.New("levels below info are forbidden in prod: debug logs end up containing PHI"))
@@ -198,7 +279,37 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		ShutdownTimeout:   st,
 		DrainDelay:        dd,
 		LogLevel:          lvl,
+
+		DBDSN:              dsn,
+		DBMaxConns:         maxConns,
+		DBConnectTimeout:   dbct,
+		DBStatementTimeout: dbst,
+		DBMaxConnLifetime:  dblt,
 	}, nil
+}
+
+// Migrate — конфиг cmd/migrate. Отдельный от Config: мигратору не нужны
+// HTTP-настройки, а API не должен знать DSN владельца схемы.
+type Migrate struct {
+	// Env решает, обязателен ли TLS до БД (вне dev — да) и формат логов.
+	Env Env
+	// DSN роли-владельца схемы. У API своя роль без прав на DDL.
+	DSN Secret
+}
+
+// LoadMigrate читает конфиг мигратора из окружения процесса.
+func LoadMigrate() (Migrate, error) {
+	return loadMigrate(os.LookupEnv)
+}
+
+func loadMigrate(lookup func(string) (string, bool)) (Migrate, error) {
+	l := &loader{lookup: lookup}
+	env, _ := l.env(keyEnv)
+	dsn, _ := l.secret(keyMigrateDSN)
+	if err := errors.Join(l.errs...); err != nil {
+		return Migrate{}, err
+	}
+	return Migrate{Env: env, DSN: dsn}, nil
 }
 
 // loader накапливает ошибки, чтобы оператор увидел их все сразу.
@@ -297,6 +408,39 @@ func (l *loader) duration(key string, def time.Duration, b bounds) (time.Duratio
 		return 0, false
 	}
 	return d, true
+}
+
+// secret читает обязательную секретную переменную. Ошибки не содержат
+// значения: required и errEmpty его не упоминают, а парсинг DSN делает
+// драйвер и возвращает ошибку без %w (см. platform/postgres).
+func (l *loader) secret(key string) (Secret, bool) {
+	s, ok := l.required(key)
+	if !ok {
+		return Secret{}, false
+	}
+	return Secret{v: s}, true
+}
+
+// intRange парсит целое и проверяет диапазон [lo, hi].
+func (l *loader) intRange(key string, def, lo, hi int32) (int32, bool) {
+	s, ok := l.lookup(key)
+	if !ok {
+		return def, true
+	}
+	if s == "" {
+		l.fail(key, errEmpty)
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		l.fail(key, err)
+		return 0, false
+	}
+	if v := int32(n); v < lo || v > hi {
+		l.fail(key, fmt.Errorf("%d is out of range [%d, %d]", v, lo, hi))
+		return 0, false
+	}
+	return int32(n), true
 }
 
 func (l *loader) logLevel(key, def string) (slog.Level, bool) {

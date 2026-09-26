@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -21,10 +22,14 @@ func lookupFrom(m map[string]string) func(string) (string, bool) {
 	}
 }
 
+// testDSN — значение-маркер: тесты проверяют, что оно не утекает в логи
+// и форматированный вывод.
+const testDSN = "postgres://app:s3cr3t-pw@db.internal:5432/neurodent"
+
 // withEnv — окружение staging плюс переопределения. Staging выбран базой,
 // потому что у него ненулевой DrainDelay и все инварианты работают.
 func withEnv(kv ...string) map[string]string {
-	m := map[string]string{"NEURODENT_ENV": "staging"}
+	m := map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"}
 	for i := 0; i < len(kv); i += 2 {
 		m[kv[i]] = kv[i+1]
 	}
@@ -41,7 +46,7 @@ func TestLoad_Valid(t *testing.T) {
 	}{
 		{
 			name: "dev on defaults has no drain delay",
-			env:  map[string]string{"NEURODENT_ENV": "dev"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"},
 			want: Config{
 				Env:               "dev",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -53,11 +58,17 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         10,
+				DBConnectTimeout:   5 * time.Second,
+				DBStatementTimeout: 5 * time.Second,
+				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
 		{
 			name: "staging on defaults drains for 2s",
-			env:  map[string]string{"NEURODENT_ENV": "staging"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"},
 			want: Config{
 				Env:               "staging",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -69,11 +80,17 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        2 * time.Second,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         10,
+				DBConnectTimeout:   5 * time.Second,
+				DBStatementTimeout: 5 * time.Second,
+				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
 		{
 			name: "prod with info level",
-			env:  map[string]string{"NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "info"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "info"},
 			want: Config{
 				Env:               "prod",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -85,21 +102,32 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        2 * time.Second,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         10,
+				DBConnectTimeout:   5 * time.Second,
+				DBStatementTimeout: 5 * time.Second,
+				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
 		{
 			name: "dev with every variable customized",
 			env: map[string]string{
-				"NEURODENT_ENV":                 "dev",
-				"NEURODENT_HTTP_ADDR":           "0.0.0.0:9090",
-				"NEURODENT_READ_HEADER_TIMEOUT": "2s",
-				"NEURODENT_READ_TIMEOUT":        "30s",
-				"NEURODENT_WRITE_TIMEOUT":       "20s",
-				"NEURODENT_HANDLER_TIMEOUT":     "8s",
-				"NEURODENT_IDLE_TIMEOUT":        "90s",
-				"NEURODENT_SHUTDOWN_TIMEOUT":    "20s",
-				"NEURODENT_DRAIN_DELAY":         "3s",
-				"NEURODENT_LOG_LEVEL":           "debug",
+				"NEURODENT_DB_DSN":               testDSN,
+				"NEURODENT_ENV":                  "dev",
+				"NEURODENT_HTTP_ADDR":            "0.0.0.0:9090",
+				"NEURODENT_READ_HEADER_TIMEOUT":  "2s",
+				"NEURODENT_READ_TIMEOUT":         "30s",
+				"NEURODENT_WRITE_TIMEOUT":        "20s",
+				"NEURODENT_HANDLER_TIMEOUT":      "8s",
+				"NEURODENT_IDLE_TIMEOUT":         "90s",
+				"NEURODENT_SHUTDOWN_TIMEOUT":     "20s",
+				"NEURODENT_DRAIN_DELAY":          "3s",
+				"NEURODENT_LOG_LEVEL":            "debug",
+				"NEURODENT_DB_MAX_CONNS":         "25",
+				"NEURODENT_DB_CONNECT_TIMEOUT":   "3s",
+				"NEURODENT_DB_STATEMENT_TIMEOUT": "2500ms",
+				"NEURODENT_DB_MAX_CONN_LIFETIME": "1h",
 			},
 			want: Config{
 				Env:               "dev",
@@ -112,6 +140,12 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   20 * time.Second,
 				DrainDelay:        3 * time.Second,
 				LogLevel:          slog.LevelDebug,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         25,
+				DBConnectTimeout:   3 * time.Second,
+				DBStatementTimeout: 2500 * time.Millisecond,
+				DBMaxConnLifetime:  time.Hour,
 			},
 		},
 		{
@@ -127,6 +161,10 @@ func TestLoad_Valid(t *testing.T) {
 				"NEURODENT_IDLE_TIMEOUT", "10s",
 				"NEURODENT_SHUTDOWN_TIMEOUT", "1001ms",
 				"NEURODENT_DRAIN_DELAY", "0s",
+				"NEURODENT_DB_MAX_CONNS", "1",
+				"NEURODENT_DB_CONNECT_TIMEOUT", "1s",
+				"NEURODENT_DB_STATEMENT_TIMEOUT", "100ms",
+				"NEURODENT_DB_MAX_CONN_LIFETIME", "1m",
 			),
 			want: Config{
 				Env:               "staging",
@@ -139,18 +177,27 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   1001 * time.Millisecond,
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         1,
+				DBConnectTimeout:   time.Second,
+				DBStatementTimeout: 100 * time.Millisecond,
+				DBMaxConnLifetime:  time.Minute,
 			},
 		},
 		{
 			// SHUTDOWN <= 25s и SHUTDOWN >= WRITE, поэтому max для WRITE (1m)
 			// в валидном конфиге недостижим — он проверяется в TestLoad_Errors.
-			name: "read, idle and drain at max, shutdown+drain exactly at budget",
+			name: "read, idle, drain and db ranges at max, shutdown+drain exactly at budget",
 			env: withEnv(
 				"NEURODENT_HTTP_ADDR", ":65535",
 				"NEURODENT_READ_HEADER_TIMEOUT", "10s",
 				"NEURODENT_READ_TIMEOUT", "1m",
 				"NEURODENT_IDLE_TIMEOUT", "5m",
 				"NEURODENT_DRAIN_DELAY", "10s",
+				"NEURODENT_DB_MAX_CONNS", "100",
+				"NEURODENT_DB_CONNECT_TIMEOUT", "30s",
+				"NEURODENT_DB_MAX_CONN_LIFETIME", "24h",
 			),
 			want: Config{
 				Env:               "staging",
@@ -163,6 +210,12 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   15 * time.Second,
 				DrainDelay:        10 * time.Second,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         100,
+				DBConnectTimeout:   30 * time.Second,
+				DBStatementTimeout: 5 * time.Second,
+				DBMaxConnLifetime:  24 * time.Hour,
 			},
 		},
 		{
@@ -183,6 +236,12 @@ func TestLoad_Valid(t *testing.T) {
 				ShutdownTimeout:   25 * time.Second,
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
+
+				DBDSN:              Secret{v: testDSN},
+				DBMaxConns:         10,
+				DBConnectTimeout:   5 * time.Second,
+				DBStatementTimeout: 5 * time.Second,
+				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
 	}
@@ -210,19 +269,19 @@ func TestLoad_Errors(t *testing.T) {
 		// ENV
 		{
 			name:     "missing env",
-			env:      map[string]string{},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 		{
 			name:     "unknown env",
-			env:      map[string]string{"NEURODENT_ENV": "production"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "production"},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 
 		// set-but-empty (N1): пустая строка — ошибка, а не дефолт.
 		{
 			name:      "empty env",
-			env:       map[string]string{"NEURODENT_ENV": ""},
+			env:       map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": ""},
 			wantKeys:  []string{"NEURODENT_ENV"},
 			wantEmpty: true,
 		},
@@ -249,7 +308,8 @@ func TestLoad_Errors(t *testing.T) {
 		{
 			name: "single typo gives single error",
 			env: map[string]string{
-				"NEURODENT_ENV": "dev", "NEURODENT_READ_TIMEOUT": "5x",
+				"NEURODENT_DB_DSN": testDSN,
+				"NEURODENT_ENV":    "dev", "NEURODENT_READ_TIMEOUT": "5x",
 			},
 			wantKeys: []string{"NEURODENT_READ_TIMEOUT"},
 		},
@@ -270,7 +330,7 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "broken env does not trigger prod level check",
-			env:      map[string]string{"NEURODENT_ENV": "prd", "NEURODENT_LOG_LEVEL": "debug"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prd", "NEURODENT_LOG_LEVEL": "debug"},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 		{
@@ -370,7 +430,7 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "write at min is in range but not above handler",
-			env:      withEnv("NEURODENT_WRITE_TIMEOUT", "1s", "NEURODENT_HANDLER_TIMEOUT", "1s"),
+			env:      withEnv("NEURODENT_WRITE_TIMEOUT", "1s", "NEURODENT_HANDLER_TIMEOUT", "1s", "NEURODENT_DB_STATEMENT_TIMEOUT", "500ms"),
 			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
 		},
 		{
@@ -404,8 +464,82 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "prod with debug",
-			env:      map[string]string{"NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "debug"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "debug"},
 			wantKeys: []string{"NEURODENT_LOG_LEVEL"},
+		},
+
+		// База данных.
+		{
+			name:     "missing dsn",
+			env:      map[string]string{"NEURODENT_ENV": "dev"},
+			wantKeys: []string{"NEURODENT_DB_DSN"},
+		},
+		{
+			name:      "empty dsn",
+			env:       withEnv("NEURODENT_DB_DSN", ""),
+			wantKeys:  []string{"NEURODENT_DB_DSN"},
+			wantEmpty: true,
+		},
+		{
+			name:     "missing env and dsn give two errors",
+			env:      map[string]string{},
+			wantKeys: []string{"NEURODENT_DB_DSN", "NEURODENT_ENV"},
+		},
+		{
+			name:     "max conns zero",
+			env:      withEnv("NEURODENT_DB_MAX_CONNS", "0"),
+			wantKeys: []string{"NEURODENT_DB_MAX_CONNS"},
+		},
+		{
+			name:     "max conns just above max",
+			env:      withEnv("NEURODENT_DB_MAX_CONNS", "101"),
+			wantKeys: []string{"NEURODENT_DB_MAX_CONNS"},
+		},
+		{
+			name:     "max conns not a number",
+			env:      withEnv("NEURODENT_DB_MAX_CONNS", "ten"),
+			wantKeys: []string{"NEURODENT_DB_MAX_CONNS"},
+		},
+		{
+			name:     "max conns overflows int32",
+			env:      withEnv("NEURODENT_DB_MAX_CONNS", "4294967306"),
+			wantKeys: []string{"NEURODENT_DB_MAX_CONNS"},
+		},
+		{
+			name:      "empty max conns",
+			env:       withEnv("NEURODENT_DB_MAX_CONNS", ""),
+			wantKeys:  []string{"NEURODENT_DB_MAX_CONNS"},
+			wantEmpty: true,
+		},
+		{
+			name:     "connect timeout just above max",
+			env:      withEnv("NEURODENT_DB_CONNECT_TIMEOUT", "30001ms"),
+			wantKeys: []string{"NEURODENT_DB_CONNECT_TIMEOUT"},
+		},
+		{
+			name:     "statement timeout just below min",
+			env:      withEnv("NEURODENT_DB_STATEMENT_TIMEOUT", "99ms"),
+			wantKeys: []string{"NEURODENT_DB_STATEMENT_TIMEOUT"},
+		},
+		{
+			name:     "conn lifetime just above max",
+			env:      withEnv("NEURODENT_DB_MAX_CONN_LIFETIME", "24h1s"),
+			wantKeys: []string{"NEURODENT_DB_MAX_CONN_LIFETIME"},
+		},
+		{
+			name:     "statement timeout equal to handler timeout",
+			env:      withEnv("NEURODENT_DB_STATEMENT_TIMEOUT", "10s"),
+			wantKeys: []string{"NEURODENT_DB_STATEMENT_TIMEOUT"},
+		},
+		{
+			name:     "statement timeout at max is in range but not below handler",
+			env:      withEnv("NEURODENT_DB_STATEMENT_TIMEOUT", "1m"),
+			wantKeys: []string{"NEURODENT_DB_STATEMENT_TIMEOUT"},
+		},
+		{
+			name:     "broken handler timeout does not cascade to statement timeout",
+			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "abc", "NEURODENT_DB_STATEMENT_TIMEOUT", "9s"),
+			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
 		},
 
 		// Адрес (N2).
@@ -476,7 +610,7 @@ func errorKeys(t *testing.T, err error) []string {
 }
 
 func TestConfig_LogValue(t *testing.T) {
-	cfg, err := load(lookupFrom(map[string]string{"NEURODENT_ENV": "dev"}))
+	cfg, err := load(lookupFrom(map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +628,10 @@ func TestConfig_LogValue(t *testing.T) {
 	// Ровно этот набор. Новое поле в логе — осознанное решение, которое
 	// должно пройти через этот список.
 	want := []string{
+		"db_connect_timeout",
+		"db_max_conn_lifetime",
+		"db_max_conns",
+		"db_statement_timeout",
 		"drain_delay",
 		"env",
 		"handler_timeout",
@@ -524,6 +662,7 @@ func FuzzLoad(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, env, rht, rt, wt, ht, st, dd string) {
 		cfg, err := load(lookupFrom(map[string]string{
+			"NEURODENT_DB_DSN":              testDSN,
 			"NEURODENT_ENV":                 env,
 			"NEURODENT_READ_HEADER_TIMEOUT": rht,
 			"NEURODENT_READ_TIMEOUT":        rt,
@@ -554,6 +693,9 @@ func FuzzLoad(f *testing.F) {
 		if cfg.HandlerTimeout >= cfg.WriteTimeout {
 			t.Errorf("HandlerTimeout %s >= WriteTimeout %s", cfg.HandlerTimeout, cfg.WriteTimeout)
 		}
+		if cfg.DBStatementTimeout >= cfg.HandlerTimeout {
+			t.Errorf("DBStatementTimeout %s >= HandlerTimeout %s", cfg.DBStatementTimeout, cfg.HandlerTimeout)
+		}
 		if cfg.ShutdownTimeout < cfg.WriteTimeout {
 			t.Errorf("ShutdownTimeout %s < WriteTimeout %s", cfg.ShutdownTimeout, cfg.WriteTimeout)
 		}
@@ -564,4 +706,73 @@ func FuzzLoad(f *testing.F) {
 			t.Errorf("Env = %q", cfg.Env)
 		}
 	})
+}
+
+// TestSecret_NeverPrinted: DSN не должен утечь ни одним стандартным способом
+// вывода — ни сам по себе, ни внутри Config.
+func TestSecret_NeverPrinted(t *testing.T) {
+	cfg, err := load(lookupFrom(withEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBDSN.Reveal() != testDSN {
+		t.Fatalf("Reveal() = %q, want the original DSN", cfg.DBDSN.Reveal())
+	}
+
+	var outputs []string
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d"} {
+		outputs = append(outputs, fmt.Sprintf(verb, cfg), fmt.Sprintf(verb, cfg.DBDSN))
+	}
+	js, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs = append(outputs, string(js))
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	log.Info("cfg", "config", cfg, "dsn", cfg.DBDSN)
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("cfg", "config", cfg, "dsn", cfg.DBDSN)
+	outputs = append(outputs, buf.String())
+
+	for _, out := range outputs {
+		for _, leak := range []string{"s3cr3t-pw", "db.internal", testDSN} {
+			if strings.Contains(out, leak) {
+				t.Errorf("secret part %q leaked in output: %s", leak, out)
+			}
+		}
+	}
+}
+
+func TestLoadMigrate(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantKeys  []string
+		wantEmpty bool
+	}{
+		{name: "missing both", env: map[string]string{}, wantKeys: []string{"NEURODENT_ENV", "NEURODENT_MIGRATE_DSN"}},
+		{name: "empty dsn", env: map[string]string{"NEURODENT_ENV": "dev", "NEURODENT_MIGRATE_DSN": ""}, wantKeys: []string{"NEURODENT_MIGRATE_DSN"}, wantEmpty: true},
+		{name: "unknown env", env: map[string]string{"NEURODENT_ENV": "qa", "NEURODENT_MIGRATE_DSN": testDSN}, wantKeys: []string{"NEURODENT_ENV"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadMigrate(lookupFrom(tt.env))
+			if got := errorKeys(t, err); !slices.Equal(got, tt.wantKeys) {
+				t.Errorf("error keys = %v, want %v", got, tt.wantKeys)
+			}
+			if errors.Is(err, errEmpty) != tt.wantEmpty {
+				t.Errorf("errors.Is(err, errEmpty) = %v, want %v", errors.Is(err, errEmpty), tt.wantEmpty)
+			}
+		})
+	}
+
+	got, err := loadMigrate(lookupFrom(map[string]string{"NEURODENT_ENV": "prod", "NEURODENT_MIGRATE_DSN": testDSN}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Env != "prod" || got.DSN.Reveal() != testDSN {
+		t.Errorf("loadMigrate() = %v, %q", got.Env, got.DSN.Reveal())
+	}
 }
