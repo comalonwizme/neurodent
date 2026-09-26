@@ -80,7 +80,7 @@ func testRLS(t *testing.T, env *pgEnv) {
 		}{
 			{"disable RLS", []string{"ALTER TABLE platform.rls_probe DISABLE ROW LEVEL SECURITY"}},
 			{"drop FORCE", []string{"ALTER TABLE platform.rls_probe NO FORCE ROW LEVEL SECURITY"}},
-			{"drop policy", []string{"DROP POLICY tenant_isolation ON platform.rls_probe"}},
+			{"drop policy", []string{"DROP POLICY tenant_guard ON platform.rls_probe"}},
 			{"add permissive policy", []string{"CREATE POLICY open ON platform.rls_probe USING (true)"}},
 			{"row_security off", []string{"SET LOCAL row_security = off", "SELECT count(*) FROM platform.rls_probe"}},
 			{"become owner", []string{"SET LOCAL ROLE neurodent_owner"}},
