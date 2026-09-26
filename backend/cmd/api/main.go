@@ -1,3 +1,5 @@
+// Команда api — HTTP API NeuroDent: читает конфиг из окружения, собирает
+// приложение (internal/app) и работает до SIGINT/SIGTERM.
 package main
 
 import (

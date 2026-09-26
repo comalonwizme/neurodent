@@ -59,7 +59,7 @@ func (p *Probe) Liveness(w http.ResponseWriter, _ *http.Request) {
 	write(w, http.StatusOK, bodyOk)
 }
 
-// Readiness: 503 при drain или при провале любой проверки. Какая проверка
+// Readiness отвечает 503 при drain или при провале любой проверки. Какая проверка
 // упала, пишется в лог, а не в ответ: деталям инфраструктуры в теле
 // ответа не место.
 func (p *Probe) Readiness(w http.ResponseWriter, r *http.Request) {

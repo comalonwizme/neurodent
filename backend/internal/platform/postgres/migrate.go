@@ -195,10 +195,13 @@ func parseMigrationName(file string) (int, string, error) {
 		return 0, "", fmt.Errorf("%s: %w", file, errMigrationName)
 	}
 	for i := range len(name) {
-		c := name[i]
-		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '_') {
+		if !isSnakeChar(name[i]) {
 			return 0, "", fmt.Errorf("%s: %w", file, errMigrationName)
 		}
 	}
 	return version, name, nil
+}
+
+func isSnakeChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '_'
 }

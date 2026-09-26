@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,13 +37,14 @@ func Recover(log *slog.Logger) Middleware {
 				if p == nil {
 					return
 				}
-				value, stack := p, []byte(nil)
+				value := p
+				var stack []byte
 				if pe, ok := p.(*panicError); ok {
 					value, stack = pe.value, pe.stack
 				} else {
 					stack = debug.Stack()
 				}
-				if value == http.ErrAbortHandler {
+				if err, ok := value.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					panic(http.ErrAbortHandler)
 				}
 

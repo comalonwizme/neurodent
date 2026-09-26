@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -88,6 +89,12 @@ func servePanics(h http.Handler, w http.ResponseWriter, r *http.Request) (p any)
 	defer func() { p = recover() }()
 	h.ServeHTTP(w, r)
 	return nil
+}
+
+// isAbort сообщает, что паника — http.ErrAbortHandler.
+func isAbort(p any) bool {
+	err, ok := p.(error)
+	return ok && errors.Is(err, http.ErrAbortHandler)
 }
 
 // receive ждёт значение из канала со страховкой.

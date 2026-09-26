@@ -17,6 +17,8 @@ import (
 // только через parseEnv, поэтому после Load() невалидного Env не существует.
 type Env string
 
+// Поддерживаемые окружения. От окружения зависят уровень безопасности
+// (HSTS, TLS до БД, запрет debug-логов в prod) и задержка drain.
 const (
 	EnvDev     Env = "dev"
 	EnvStaging Env = "staging"
@@ -237,7 +239,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 
 	lvl, lvlOK := l.logLevel(keyLogLevel, defaultLogLevel)
 
-	dsn, _ := l.secret(keyDBDSN)
+	dsn := l.secret(keyDBDSN)
 	maxConns, _ := l.intRange(keyDBMaxConns, defaultDBMaxConns, 1, 100)
 	dbct, _ := l.duration(keyDBConnectTimeout, defaultDBConnectTimeout, bounds{time.Second, 30 * time.Second})
 	dbst, dbstOK := l.duration(keyDBStatementTimeout, defaultDBStatementTimeout, bounds{100 * time.Millisecond, time.Minute})
@@ -305,7 +307,7 @@ func LoadMigrate() (Migrate, error) {
 func loadMigrate(lookup func(string) (string, bool)) (Migrate, error) {
 	l := &loader{lookup: lookup}
 	env, _ := l.env(keyEnv)
-	dsn, _ := l.secret(keyMigrateDSN)
+	dsn := l.secret(keyMigrateDSN)
 	if err := errors.Join(l.errs...); err != nil {
 		return Migrate{}, err
 	}
@@ -413,12 +415,12 @@ func (l *loader) duration(key string, def time.Duration, b bounds) (time.Duratio
 // secret читает обязательную секретную переменную. Ошибки не содержат
 // значения: required и errEmpty его не упоминают, а парсинг DSN делает
 // драйвер и возвращает ошибку без %w (см. platform/postgres).
-func (l *loader) secret(key string) (Secret, bool) {
-	s, ok := l.required(key)
-	if !ok {
-		return Secret{}, false
-	}
-	return Secret{v: s}, true
+//
+// Возвращает только значение: у секретов нет кросс-полевых инвариантов,
+// и признак валидности никому не нужен.
+func (l *loader) secret(key string) Secret {
+	s, _ := l.required(key)
+	return Secret{v: s}
 }
 
 // intRange парсит целое и проверяет диапазон [lo, hi].

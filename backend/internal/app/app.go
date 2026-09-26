@@ -19,6 +19,8 @@ import (
 	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
 )
 
+// App — собранное приложение: конфиг, логгер, HTTP-сервер и ресурсы,
+// которые нужно закрыть при остановке.
 type App struct {
 	cfg    config.Config
 	log    *slog.Logger

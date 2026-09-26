@@ -118,6 +118,7 @@ func jsonKind(t reflect.Type) string {
 		return "an array"
 	case reflect.Map, reflect.Struct:
 		return "an object"
+	default:
+		return "a valid value"
 	}
-	return "a valid value"
 }

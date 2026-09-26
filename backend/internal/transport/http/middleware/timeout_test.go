@@ -186,7 +186,7 @@ func TestTimeout_AbortHandlerPropagates(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}), middleware.Recover(log), middleware.Timeout(guard, log))
 	p := servePanics(h, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	if p != http.ErrAbortHandler {
+	if !isAbort(p) {
 		t.Errorf("panic = %v, want http.ErrAbortHandler", p)
 	}
 }

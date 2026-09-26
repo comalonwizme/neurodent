@@ -66,7 +66,7 @@ func TestRecover_AbortHandlerPropagatesSilently(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}))
 	p := servePanics(h, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	if p != http.ErrAbortHandler {
+	if !isAbort(p) {
 		t.Errorf("panic = %v, want http.ErrAbortHandler", p)
 	}
 	if logs.String() != "" {
@@ -85,7 +85,7 @@ func TestRecover_PanicAfterResponseStartedAbortsConnection(t *testing.T) {
 
 	// Дописать 500 после начатого 200 нельзя; обрыв соединения — единственный
 	// способ не выдать обрезанный ответ за успешный.
-	if p != http.ErrAbortHandler {
+	if !isAbort(p) {
 		t.Errorf("panic = %v, want http.ErrAbortHandler", p)
 	}
 	findRecord(t, logs.records(t), "panic recovered")

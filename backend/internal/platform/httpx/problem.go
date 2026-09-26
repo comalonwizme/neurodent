@@ -52,8 +52,9 @@ func StatusOf(err error) int {
 		return http.StatusTooManyRequests
 	case apperr.Unavailable:
 		return http.StatusServiceUnavailable
+	default: // Internal и неизвестные категории
+		return http.StatusInternalServerError
 	}
-	return http.StatusInternalServerError
 }
 
 // WriteError — конечная точка ошибки в хендлере: пишет problem-ответ и,
