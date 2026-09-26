@@ -1,0 +1,105 @@
+# CI бэкенда. Экшены закреплены по SHA коммита (тег в комментарии): тег
+# можно перевесить, SHA — нет. Это защита цепочки поставки: чужой код
+# выполняется в CI с доступом к репозиторию.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Только чтение: CI ничего не публикует.
+permissions:
+  contents: read
+
+# Новый push в ту же ветку отменяет устаревший прогон.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLANGCI_LINT_VERSION: v2.14.0
+  GOVULNCHECK_VERSION: v1.8.0
+
+jobs:
+  lint:
+    name: gofmt, vet, golangci-lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l backend)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: |
+          go -C backend vet ./...
+          go -C backend vet -tags=integration ./...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: backend
+          # Сборка из исходников текущим Go: готовый бинарник может быть
+          # собран более старым Go и отказаться анализировать go 1.27.
+          install-mode: goinstall
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: govulncheck
+        # Проверяет и зависимости integration-тестов (testcontainers, docker).
+        run: |
+          go -C backend run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+          go -C backend run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} -tags=integration ./...
+
+  test:
+    name: unit tests (-race)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: make test
+        run: make test
+      - name: go mod tidy is clean
+        run: |
+          go -C backend mod tidy
+          git diff --exit-code -- backend/go.mod backend/go.sum
+
+  integration:
+    name: integration tests (Postgres)
+    runs-on: ubuntu-24.04 # Docker есть на раннере: testcontainers работает без настройки
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: make test-integration
+        run: make test-integration

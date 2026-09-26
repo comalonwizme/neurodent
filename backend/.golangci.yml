@@ -1,0 +1,95 @@
+# golangci-lint v2. Набор выбран под правила проекта: каждое правило из
+# CONTRIBUTING-уровня («без глобальных переменных», «без init()», «ошибки
+# через %w», «doc-комментарий у экспортируемого») проверяется машиной, а не
+# только ревью. Исключения — только с причиной рядом.
+version: "2"
+
+run:
+  # Integration-тесты тоже код: линтуем их.
+  build-tags:
+    - integration
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    # Корректность
+    - bodyclose # незакрытое тело ответа держит соединение (и мешает Shutdown)
+    - durationcheck # time.Duration * time.Duration
+    - errorlint # сравнение ошибок без errors.Is/As, %v вместо %w
+    - exhaustive # switch по enum (apperr.Kind) без всех вариантов
+    - makezero
+    - nilerr # return nil при err != nil
+    - noctx # HTTP/SQL без контекста
+    - rowserrcheck # забытый rows.Err()
+    - sqlclosecheck # незакрытые rows/stmt
+    - unparam
+    - wastedassign
+    # Безопасность
+    - gosec
+    # Правила проекта
+    - forbidigo # os.Exit только в main, panic — только осознанно
+    - gochecknoglobals # без глобальных переменных (sentinel-ошибки и go:embed разрешены линтером)
+    - gochecknoinits # без init()
+    - nolintlint # каждый //nolint с причиной и по делу
+    - revive # doc-комментарии у экспортируемого
+    # Стиль, который ловит баги
+    - errname # sentinel-ошибки ErrX/errX, типы ошибок XError
+    - gocritic
+    - predeclared # переменная с именем встроенного (len, new, int32…)
+    - unconvert
+    - usestdlibvars # http.MethodGet вместо "GET"
+
+  settings:
+    exhaustive:
+      # default в switch — осознанное «остальное»; без него — все варианты.
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^os\.Exit$
+          msg: "os.Exit только в main.main: он пропускает defer"
+        - pattern: ^(fmt\.Print|print|println)
+          msg: "пишите через slog"
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: context-as-argument
+          arguments:
+            # Тестовые хелперы по конвенции принимают t первым.
+            - allowTypesBefore: "*testing.T"
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: receiver-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    presets:
+      - std-error-handling # стандартные исключения errcheck для Close/Print в stdlib-стиле
+    rules:
+      # main — единственное место для os.Exit (см. комментарий в cmd/*/main.go).
+      - path: cmd/.+/main\.go
+        linters: [forbidigo]
+        text: os\.Exit
+      # В тестах допустимы: запросы без ctx к httptest (noctx), небезопасные
+      # для прода конструкции вроде нефиксированных путей (gosec) и таблицы
+      # тест-кейсов на уровне пакета (gochecknoglobals).
+      - path: _test\.go
+        linters: [gosec, noctx, gochecknoglobals, unparam]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/comalonwizme/neurodent/backend
