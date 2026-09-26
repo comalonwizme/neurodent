@@ -16,6 +16,7 @@ import (
 	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpserver"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/logger"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
 )
 
 type App struct {
@@ -26,13 +27,16 @@ type App struct {
 
 	// Ресурсы, которые нужно закрыть при остановке, в порядке создания.
 	// Закрываются в обратном порядке, как деструкторы членов класса в C++.
-	// Сейчас пусто; первым сюда попадёт пул Postgres.
+	// Первый — пул Postgres: он закрывается после остановки HTTP-сервера.
 	closers []io.Closer
 }
 
 // New собирает приложение. Если сборка падает на середине, уже созданные
 // ресурсы закрываются (именованный err + defer).
-func New(cfg config.Config, logOut io.Writer) (a *App, err error) {
+//
+// ctx ограничивает только сборку (подключение к БД): отмена по сигналу во
+// время старта прерывает его, а не ждёт таймаутов.
+func New(ctx context.Context, cfg config.Config, logOut io.Writer) (a *App, err error) {
 	a = &App{cfg: cfg}
 	defer func() {
 		if err != nil {
@@ -44,12 +48,21 @@ func New(cfg config.Config, logOut io.Writer) (a *App, err error) {
 	a.log = newLogger(cfg, logOut)
 	a.log.Info("starting", "config", cfg) // cfg логируется через LogValue (allowlist)
 
-	// Будущие ресурсы добавляются так:
-	//   pool, err := postgres.New(ctx, ...)
-	//   if err != nil { return nil, fmt.Errorf("postgres: %w", err) }
-	//   a.closers = append(a.closers, pool)
+	db, err := postgres.New(ctx, postgres.Options{
+		DSN:              cfg.DBDSN.Reveal(),
+		MaxConns:         cfg.DBMaxConns,
+		ConnectTimeout:   cfg.DBConnectTimeout,
+		StatementTimeout: cfg.DBStatementTimeout,
+		MaxConnLifetime:  cfg.DBMaxConnLifetime,
+		ApplicationName:  "neurodent-api",
+		RequireTLS:       cfg.Env != config.EnvDev,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: %w", err)
+	}
+	a.closers = append(a.closers, db)
 
-	a.probe = health.NewProbe()
+	a.probe = health.NewProbe(a.log, health.Check{Name: "postgres", Fn: db.Ping})
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, a.probe)

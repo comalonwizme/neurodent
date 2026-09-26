@@ -38,7 +38,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	a, err := app.New(cfg, os.Stdout)
+	a, err := app.New(ctx, cfg, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}
