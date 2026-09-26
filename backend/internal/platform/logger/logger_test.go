@@ -2,6 +2,7 @@ package logger_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -64,5 +65,66 @@ func TestNew_UnknownFormatFallsBackToJSON(t *testing.T) {
 
 	if !json.Valid(buf.Bytes()) {
 		t.Errorf("unknown format did not fall back to JSON: %s", buf.String())
+	}
+}
+
+func TestWithAttrs_AddsContextAttrsToRecords(t *testing.T) {
+	var buf bytes.Buffer
+	log := logger.New(&buf, slog.LevelInfo, logger.FormatJSON).With("component", "test")
+
+	parent := logger.WithAttrs(context.Background(), slog.String("request_id", "r1"))
+	child := logger.WithAttrs(parent, slog.String("tenant", "t1"))
+	sibling := logger.WithAttrs(parent, slog.String("tenant", "t2"))
+
+	log.InfoContext(child, "hello")
+	log.InfoContext(sibling, "hello")
+	log.Info("no context")
+
+	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3:\n%s", len(lines), buf.String())
+	}
+	want := []map[string]any{
+		{"request_id": "r1", "tenant": "t1", "component": "test"},
+		{"request_id": "r1", "tenant": "t2", "component": "test"},
+		{"component": "test"},
+	}
+	for i, line := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range want[i] {
+			if rec[k] != v {
+				t.Errorf("line %d: %s = %v, want %v", i, k, rec[k], v)
+			}
+		}
+		if _, ok := rec["request_id"]; i == 2 && ok {
+			t.Errorf("line %d: request_id leaked into a record without context", i)
+		}
+	}
+}
+
+func TestWithAttrs_SurvivesWithGroupAndNilContext(t *testing.T) {
+	var buf bytes.Buffer
+	log := logger.New(&buf, slog.LevelInfo, logger.FormatJSON).WithGroup("g")
+	ctx := logger.WithAttrs(context.Background(), slog.String("request_id", "r1"))
+	log.InfoContext(ctx, "grouped")
+
+	var rec struct {
+		G map[string]any `json:"g"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.G["request_id"] != "r1" {
+		t.Errorf("request_id lost after WithGroup: %s", buf.String())
+	}
+
+	buf.Reset()
+	var nilCtx context.Context
+	log.InfoContext(nilCtx, "nil ctx") // slog подставляет Background: не паникует
+	if !json.Valid(buf.Bytes()) {
+		t.Errorf("nil context record is not JSON: %s", buf.String())
 	}
 }
