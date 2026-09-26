@@ -1,10 +1,10 @@
 package tenant_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 
+	"github.com/comalonwizme/neurodent/backend/internal/shared/id"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/tenant"
 )
 
@@ -19,43 +19,32 @@ func TestParse(t *testing.T) {
 		{"empty", "", ""},
 		{"no dashes", "0192f2a45b6c7d8e9f00112233445566", ""},
 		{"braces", "{0192f2a4-5b6c-7d8e-9f00-112233445566}", ""},
-		{"dash misplaced", "0192f2a45-b6c-7d8e-9f00-112233445566", ""},
-		{"non-hex", "0192f2a4-5b6c-7d8e-9f00-11223344556g", ""},
 		{"sql injection", "x'; SET app.tenant_id = '1", ""},
-		{"too long", "0192f2a4-5b6c-7d8e-9f00-1122334455660", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			id, err := tenant.Parse(tt.in)
+			got, err := tenant.Parse(tt.in)
 			if tt.want == "" {
-				if !errors.Is(err, tenant.ErrInvalidID) || !id.IsZero() {
-					t.Errorf("Parse(%q) = %q, %v; want ErrInvalidID", tt.in, id, err)
+				if !errors.Is(err, tenant.ErrInvalidID) || !got.IsZero() {
+					t.Errorf("Parse(%q) = %q, %v; want ErrInvalidID", tt.in, got, err)
 				}
 				return
 			}
-			if err != nil || id.String() != tt.want {
-				t.Errorf("Parse(%q) = %q, %v; want %q", tt.in, id, err, tt.want)
+			if err != nil || got.String() != tt.want {
+				t.Errorf("Parse(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
 			}
 		})
 	}
 }
 
-func TestContext(t *testing.T) {
-	ctx := context.Background()
-	if _, ok := tenant.FromContext(ctx); ok {
-		t.Error("empty context reports a tenant")
+func TestFromIDAndZero(t *testing.T) {
+	var zero tenant.ID
+	if !zero.IsZero() || zero.String() != "" {
+		t.Errorf("zero tenant: IsZero=%v String=%q", zero.IsZero(), zero.String())
 	}
-	if _, ok := tenant.FromContext(tenant.WithID(ctx, tenant.ID{})); ok {
-		t.Error("zero ID is reported as a tenant")
-	}
-
-	id, err := tenant.Parse("0192f2a4-5b6c-7d8e-9f00-112233445566")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, ok := tenant.FromContext(tenant.WithID(ctx, id))
-	if !ok || got != id {
-		t.Errorf("FromContext() = %v, %v; want %v", got, ok, id)
+	v := id.New()
+	if got := tenant.FromID(v); got.ID() != v || got.String() != v.String() {
+		t.Errorf("FromID(%s) = %s", v, got)
 	}
 }

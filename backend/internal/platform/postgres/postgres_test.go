@@ -209,7 +209,25 @@ func TestEmbeddedMigrationsAreValid(t *testing.T) {
 	if len(migs) == 0 {
 		t.Fatal("no embedded migrations")
 	}
-	if !strings.Contains(migs[0].sql, "current_setting('"+tenantSetting+"', true)") {
-		t.Errorf("migration 0001 must read %s: RLS policy and WithinTx must agree on the setting name", tenantSetting)
+	// Каждый параметр app.*, который читают политики, должен выставляться
+	// в WithinTx: иначе политика молча видит NULL.
+	read := 0
+	for _, m := range migs {
+		rest := m.sql
+		for {
+			i := strings.Index(rest, "current_setting('app.")
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len("current_setting('"):]
+			name, _, _ := strings.Cut(rest, "'")
+			read++
+			if !strings.Contains(setScopeSQL, "'"+name+"'") {
+				t.Errorf("migration %04d reads %s, but WithinTx never sets it", m.version, name)
+			}
+		}
+	}
+	if read == 0 {
+		t.Error("no migration reads app.* settings: RLS policies are missing")
 	}
 }
