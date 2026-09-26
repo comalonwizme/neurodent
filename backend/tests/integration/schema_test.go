@@ -41,12 +41,15 @@ func classTemplates() map[string][]policySpec {
 		"patient-registry": {tenantGuard, subjectGuard, staffAccess, patientRead},
 		"patient-owned":    {tenantGuard, subjectGuard, staffAccess, {"patient_access", true, "*"}},
 		"cell-global":      nil,
+		// ADR-0014: добавлять может только согласованное со scope событие;
+		// чтение — для будущей роли, только своя клиника.
+		"audit": {{"audit_insert", true, "a"}, {"audit_read", true, "r"}},
 	}
 }
 
 // rlsClasses — классы, которым обязательны ENABLE + FORCE RLS.
 func rlsClasses() []string {
-	return []string{"tenant", "tenant-public", "patient-registry", "patient-owned"}
+	return []string{"tenant", "tenant-public", "patient-registry", "patient-owned", "audit"}
 }
 
 type tableInfo struct {
@@ -122,10 +125,7 @@ func schemaViolations(tables []tableInfo) []string {
 			out = append(out, tb.name+": no class= in COMMENT ON TABLE")
 			continue
 		case !known:
-			// Классы со своими ADR (audit — 0014) проверяются своими тестами.
-			if tb.class != "audit" {
-				out = append(out, tb.name+": unknown class "+tb.class)
-			}
+			out = append(out, tb.name+": unknown class "+tb.class)
 			continue
 		}
 		if slices.Contains(rlsClasses(), tb.class) && (!tb.rls || !tb.force) {

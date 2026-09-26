@@ -2,26 +2,27 @@
 // versions:
 //   sqlc v1.31.1
 
-package probedb
+package auditdb
 
 import (
+	"time"
+
 	"github.com/comalonwizme/neurodent/backend/internal/shared/id"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // class=audit; Audit events (ADR-0014): ids and codes only, no PHI, no free text.
 type AuditEvent struct {
 	ID           id.ID
-	OccurredAt   pgtype.Timestamptz
-	RecordedAt   pgtype.Timestamptz
-	TenantID     pgtype.UUID
+	OccurredAt   time.Time
+	RecordedAt   time.Time
+	TenantID     *id.ID
 	ActorKind    string
-	ActorID      pgtype.UUID
+	ActorID      *id.ID
 	Action       string
 	ResourceType string
-	ResourceID   pgtype.UUID
+	ResourceID   *id.ID
 	Outcome      string
-	RequestID    pgtype.Text
+	RequestID    *string
 }
 
 // class=tenant; TECHNICAL: RLS probe of the tenant class for platform integration tests. Not business data.
@@ -42,7 +43,7 @@ type PlatformRlsProbeGuardian struct {
 type PlatformRlsProbePatient struct {
 	ID       id.ID
 	TenantID id.ID
-	UserID   pgtype.UUID
+	UserID   *id.ID
 	Note     string
 }
 
