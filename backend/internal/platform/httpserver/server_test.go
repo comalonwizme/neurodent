@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -239,5 +240,41 @@ func TestRun_PortInUse(t *testing.T) {
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) || opErr.Op != "listen" {
 		t.Errorf("Run() = %v, want listen error", err)
+	}
+}
+
+func TestServe_RejectsOversizedHeaders(t *testing.T) {
+	ts := startServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), guard)
+	c := newClient(t)
+
+	// Точную границу не проверяем: http.Server добавляет к лимиту 4 КиБ
+	// запаса на строку запроса. Проверяем порядок величины: типичные
+	// заголовки проходят, 64 КиБ — нет (при 1 МиБ или 4 ГиБ прошли бы).
+	tests := []struct {
+		name string
+		size int
+		want int
+	}{
+		{name: "16 KiB fits", size: 16 << 10, want: http.StatusOK},
+		{name: "64 KiB rejected", size: 64 << 10, want: http.StatusRequestHeaderFieldsTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Filler", strings.Repeat("a", tt.size))
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tt.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
 	}
 }
