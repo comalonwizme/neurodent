@@ -1,0 +1,17 @@
+# sqlc (ADR-0013): схема — наши миграции, запросы — рядом с пакетом, который
+# ими пользуется. Запуск — make generate (из каталога backend).
+version: "2"
+sql:
+  # Технические probe-таблицы integration-тестов: заодно проверяют, что
+  # сгенерированный код работает на DBTX из postgres.Tx(ctx).
+  - engine: postgresql
+    schema: migrations
+    queries: tests/integration/queries
+    gen:
+      go:
+        package: probedb
+        out: tests/integration/probedb
+        sql_package: pgx/v5
+        overrides:
+          - db_type: uuid
+            go_type: github.com/comalonwizme/neurodent/backend/internal/shared/id.ID

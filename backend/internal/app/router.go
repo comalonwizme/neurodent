@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/comalonwizme/neurodent/backend/internal/gen/platformapi"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/transport/http/middleware"
@@ -23,12 +24,23 @@ type routerOptions struct {
 	hsts           bool
 }
 
-// registerRoutes — единственное место, где видны все маршруты. Шаблон с
-// методом даёт 405 + Allow на чужой метод; GET обслуживает и HEAD.
-func registerRoutes(mux *http.ServeMux, probe *health.Probe) {
-	mux.HandleFunc("GET /healthz", probe.Liveness)
-	mux.HandleFunc("GET /readyz", probe.Readiness)
+// registerRoutes — единственное место, где маршруты попадают на mux.
+// Маршруты генерируются из api/openapi/openapi.yaml (ADR-0013): каждый
+// сгенерированный пакет регистрирует свои операции шаблонами с методом
+// (405 + Allow на чужой метод; GET обслуживает и HEAD). Модули добавят
+// сюда свои HandlerWithOptions.
+func registerRoutes(mux *http.ServeMux, log *slog.Logger, probe *health.Probe) {
+	platformapi.HandlerWithOptions(platformAPI{probe: probe}, platformapi.StdHTTPServerOptions{
+		BaseRouter:       mux,
+		ErrorHandlerFunc: httpx.ParamErrorHandler(log),
+	})
 }
+
+// platformAPI реализует сгенерированный интерфейс платформенных эндпоинтов.
+type platformAPI struct{ probe *health.Probe }
+
+func (a platformAPI) GetHealthz(w http.ResponseWriter, r *http.Request) { a.probe.Liveness(w, r) }
+func (a platformAPI) GetReadyz(w http.ResponseWriter, r *http.Request)  { a.probe.Readiness(w, r) }
 
 // newRouter оборачивает mux цепочкой middleware.
 //

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/comalonwizme/neurodent/backend/internal/gen/platformapi"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/apperr"
 )
@@ -234,5 +235,38 @@ func TestWriteProblem_WithoutRequestIDOmitsField(t *testing.T) {
 	httpx.WriteProblem(rec, r, http.StatusNotFound, "not_found", "")
 	if strings.Contains(rec.Body.String(), "request_id") || strings.Contains(rec.Body.String(), "detail") {
 		t.Errorf("empty optional fields must be omitted: %s", rec.Body.String())
+	}
+}
+
+// Ошибки параметров — те самые типы, что генерирует oapi-codegen.
+func TestParamErrorHandler(t *testing.T) {
+	const secret = "Иванов-850101300123"
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"invalid format", &platformapi.InvalidParamFormatError{ParamName: "id", Err: errors.New("invalid UUID '" + secret + "'")}, `parameter "id" is invalid`},
+		{"required", &platformapi.RequiredParamError{ParamName: "clinic_id"}, `parameter "clinic_id" is required`},
+		{"required header", &platformapi.RequiredHeaderError{ParamName: "X-Clinic", Err: errors.New("missing")}, `parameter "X-Clinic" is required`},
+		{"wrapped", fmt.Errorf("bind: %w", &platformapi.UnmarshalingParamError{ParamName: "filter", Err: errors.New(secret)}), `parameter "filter" is invalid`},
+		{"unknown error", errors.New("boom " + secret), "request parameters are invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			httpx.ParamErrorHandler(slog.New(slog.DiscardHandler))(rec, requestWithID("r1"), tt.err)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+			p := problemOf(t, rec)
+			if p.Detail != tt.want || p.Code != "invalid" || p.RequestID != "r1" {
+				t.Errorf("problem = %+v, want detail %q", p, tt.want)
+			}
+			if strings.Contains(rec.Body.String(), "850101300123") {
+				t.Errorf("parameter value echoed to the client: %s", rec.Body.String())
+			}
+		})
 	}
 }

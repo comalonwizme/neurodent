@@ -59,7 +59,7 @@ func testRouter(t *testing.T, handlerTimeout time.Duration) (http.Handler, *sync
 	log := logger.New(logs, slog.LevelDebug, logger.FormatJSON)
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, health.NewProbe(log))
+	registerRoutes(mux, log, health.NewProbe(log))
 	mux.HandleFunc("GET /panic", func(http.ResponseWriter, *http.Request) { panic("boom") })
 	mux.HandleFunc("GET /partial-panic", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"partial":`)
@@ -260,7 +260,7 @@ func TestRouter_Head(t *testing.T) {
 func TestRouter_NoHSTSInDev(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	registerRoutes(mux, health.NewProbe(log))
+	registerRoutes(mux, log, health.NewProbe(log))
 	h := newRouter(mux, log, routerOptions{handlerTimeout: time.Second, hsts: false})
 
 	rec := httptest.NewRecorder()

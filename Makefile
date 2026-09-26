@@ -1,4 +1,4 @@
-.PHONY: test cover db-env db-up db-down db-reset migrate run test-integration
+.PHONY: test cover generate db-env db-up db-down db-reset migrate run test-integration
 
 # Локальные пароли БД (создаёт db-env, файл в .gitignore).
 -include .env
@@ -12,6 +12,16 @@ test:
 
 cover:
 	go -C backend test -count=1 -coverprofile=../cover.out ./... && go -C backend tool cover -func=../cover.out
+
+# Кодогенерация (ADR-0013): сервер из api/openapi/openapi.yaml (по тегу —
+# свой конфиг рядом с пакетом), запросы sqlc. Инструменты — из backend/tools/go.mod,
+# версии закреплены там; основной go.mod они не трогают. sqlc собирается без cgo.
+# Сгенерированный код коммитится; CI проверяет, что он актуален.
+generate:
+	cd backend && for cfg in $$(find internal -name oapi-codegen.yaml | sort); do \
+	  go tool -modfile=tools/go.mod oapi-codegen -config $$cfg ../api/openapi/openapi.yaml || exit 1; \
+	done
+	cd backend && CGO_ENABLED=0 go tool -modfile=tools/go.mod sqlc generate
 
 # Генерирует случайные пароли один раз. Не перезаписывает существующий .env:
 # пароли уже зашиты в том данных. Для смены — make db-reset и удалить .env.

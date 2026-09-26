@@ -1,0 +1,9 @@
+# Генерация платформенных эндпоинтов (тег platform) из api/openapi/openapi.yaml.
+# Запуск — make generate (из каталога backend).
+package: platformapi
+generate:
+  std-http-server: true
+  models: true
+output-options:
+  include-tags: [platform]
+output: internal/gen/platformapi/platformapi.gen.go

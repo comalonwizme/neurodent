@@ -67,7 +67,7 @@ func New(ctx context.Context, cfg config.Config, logOut io.Writer) (a *App, err 
 	a.probe = health.NewProbe(a.log, health.Check{Name: "postgres", Fn: db.Ping})
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, a.probe)
+	registerRoutes(mux, a.log, a.probe)
 	handler := newRouter(mux, a.log, routerOptions{
 		handlerTimeout: cfg.HandlerTimeout,
 		hsts:           cfg.Env != config.EnvDev,

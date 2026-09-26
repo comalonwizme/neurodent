@@ -52,6 +52,34 @@ jobs:
           # собран более старым Go и отказаться анализировать go 1.27.
           install-mode: goinstall
 
+  generate:
+    name: generated code is up to date
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: |
+            backend/go.sum
+            backend/tools/go.sum
+      - name: make generate
+        run: make generate
+      - name: no changes after generation
+        # git status, а не git diff: он видит и новые неотслеживаемые файлы
+        # (например, пакет нового модуля, который забыли закоммитить).
+        run: |
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            echo "::error::generated code is stale: run make generate and commit"
+            echo "$status"
+            git --no-pager diff
+            exit 1
+          fi
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-24.04
@@ -87,7 +115,8 @@ jobs:
       - name: go mod tidy is clean
         run: |
           go -C backend mod tidy
-          git diff --exit-code -- backend/go.mod backend/go.sum
+          go -C backend/tools mod tidy
+          git diff --exit-code -- backend/go.mod backend/go.sum backend/tools/go.mod backend/tools/go.sum
 
   integration:
     name: integration tests (Postgres)
