@@ -1,3 +1,7 @@
+// Package httpserver — HTTP-сервер с таймаутами и graceful shutdown.
+//
+// Сервер знает только «работаю до отмены своего ctx». Порядок остановки
+// приложения (drain, пауза, закрытие ресурсов) решает app.
 package httpserver
 
 import (
@@ -10,8 +14,15 @@ import (
 	"time"
 )
 
-const maxHeaderBytes = 1 << 32
+// maxHeaderBytes — лимит на строку запроса и заголовки. Наши клиенты — браузер
+// с одной session-cookie и мобильное приложение: им хватает единиц КиБ.
+// 32 КиБ оставляют запас на длинные cookie и заголовки трассировки от LB.
+// Дефолт stdlib (1 МиБ) защиты не даёт: столько памяти на соединение до
+// первого байта хендлера — дешёвая атака. Превышение → 431.
+const maxHeaderBytes = 32 << 10
 
+// Options — адрес и таймауты сервера. Значения приходят из config,
+// там же обоснованы.
 type Options struct {
 	Addr              string
 	ReadHeaderTimeout time.Duration
@@ -21,6 +32,7 @@ type Options struct {
 	ShutdownTimeout   time.Duration
 }
 
+// Server — http.Server плюс логика остановки.
 type Server struct {
 	srv             *http.Server
 	log             *slog.Logger
@@ -28,6 +40,8 @@ type Server struct {
 	shutdownTimeout time.Duration
 }
 
+// New создаёт сервер. Ошибки самого net/http (например, TLS handshake)
+// пишутся в log на уровне error.
 func New(opts Options, h http.Handler, log *slog.Logger) *Server {
 	return &Server{
 		srv: &http.Server{
@@ -45,13 +59,24 @@ func New(opts Options, h http.Handler, log *slog.Logger) *Server {
 	}
 }
 
+// Run слушает Options.Addr и обслуживает запросы до отмены ctx (см. Serve).
 func (s *Server) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
 	return s.Serve(ctx, ln)
 }
+
+// Serve обслуживает запросы на ln до отмены ctx, затем выполняет graceful
+// shutdown: ждёт запросы в полёте не дольше ShutdownTimeout и обрывает
+// оставшиеся. Возвращает nil при чистой остановке; ошибку Serve, если
+// сервер упал сам; ошибку, оборачивающую context.DeadlineExceeded, если
+// пришлось обрывать соединения.
+//
+// Listener передаётся снаружи, чтобы тесты могли слушать 127.0.0.1:0 и
+// знать порт до старта.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.log.Info("http server listening", "addr", ln.Addr().String())
 

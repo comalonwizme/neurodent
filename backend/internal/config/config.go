@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +17,8 @@ import (
 // только через parseEnv, поэтому после Load() невалидного Env не существует.
 type Env string
 
+// Поддерживаемые окружения. От окружения зависят уровень безопасности
+// (HSTS, TLS до БД, запрет debug-логов в prod) и задержка drain.
 const (
 	EnvDev     Env = "dev"
 	EnvStaging Env = "staging"
@@ -30,10 +33,19 @@ const (
 	keyReadHeaderTimeout = "NEURODENT_READ_HEADER_TIMEOUT"
 	keyReadTimeout       = "NEURODENT_READ_TIMEOUT"
 	keyWriteTimeout      = "NEURODENT_WRITE_TIMEOUT"
+	keyHandlerTimeout    = "NEURODENT_HANDLER_TIMEOUT"
 	keyIdleTimeout       = "NEURODENT_IDLE_TIMEOUT"
 	keyShutdownTimeout   = "NEURODENT_SHUTDOWN_TIMEOUT"
 	keyDrainDelay        = "NEURODENT_DRAIN_DELAY"
 	keyLogLevel          = "NEURODENT_LOG_LEVEL"
+
+	keyDBDSN              = "NEURODENT_DB_DSN"
+	keyDBMaxConns         = "NEURODENT_DB_MAX_CONNS"
+	keyDBConnectTimeout   = "NEURODENT_DB_CONNECT_TIMEOUT"
+	keyDBStatementTimeout = "NEURODENT_DB_STATEMENT_TIMEOUT"
+	keyDBMaxConnLifetime  = "NEURODENT_DB_MAX_CONN_LIFETIME"
+
+	keyMigrateDSN = "NEURODENT_MIGRATE_DSN"
 )
 
 // Бюджет остановки процесса.
@@ -67,9 +79,16 @@ const (
 	// Заголовки + тело. 1 МБ на ~1 Мбит/с аплинка (слабый 3G) ≈ 8s; 15s — с запасом.
 	defaultReadTimeout = 15 * time.Second
 
-	// Хендлер + запись ответа. Timeout-middleware (шаг 0.3) будет ~10s — меньше
+	// Хендлер + запись ответа. Timeout-middleware (HandlerTimeout, 10s) меньше
 	// этого значения, чтобы клиент получил нормальный 503, а не оборванное соединение.
 	defaultWriteTimeout = 15 * time.Second
+
+	// Бюджет хендлера в timeout-middleware. Строго меньше WriteTimeout: после
+	// таймаута middleware ещё должен успеть записать 503 до дедлайна соединения.
+	// 10s: JSON-эндпоинт, которому нужно больше, делает что-то не то (долгие
+	// операции уходят в фон через очередь); 5s запаса до WriteTimeout хватает
+	// на запись problem-ответа даже медленному клиенту.
+	defaultHandlerTimeout = 10 * time.Second
 
 	// Должен быть БОЛЬШЕ idle-таймаута балансировщика (AWS ALB — 60s, nginx
 	// keepalive_timeout — 75s). Если мы закроем keep-alive раньше LB, он может
@@ -86,6 +105,27 @@ const (
 	defaultDrainDelayDev = 0
 
 	defaultLogLevel = "info"
+
+	// Пул на процесс. max_connections в Postgres по умолчанию 100, и каждое
+	// соединение — отдельный процесс с памятью. 10 на реплику API оставляет
+	// место для нескольких реплик, мигратора, мониторинга и админского доступа.
+	// Хендлер держит соединение только на время транзакции, 10 параллельных
+	// транзакций — сотни RPS для коротких запросов.
+	defaultDBMaxConns = 10
+
+	// Установка соединения внутри региона — миллисекунды, TLS + SCRAM под
+	// нагрузкой — сотни. 5s ловят недоступную БД на старте, не подвешивая его.
+	defaultDBConnectTimeout = 5 * time.Second
+
+	// statement_timeout на стороне Postgres. Меньше HandlerTimeout (инвариант):
+	// запрос, который переживёт хендлер, — работа впустую, держащая соединение
+	// и блокировки. OLTP-запрос дольше 5s — баг или отсутствующий индекс.
+	defaultDBStatementTimeout = 5 * time.Second
+
+	// Соединения пересоздаются: после failover (новый primary за тем же DNS),
+	// ротации паролей и чтобы backend-процессы не копили память. 30m — ротация
+	// заметна за время одного деплоя и не создаёт шторма переподключений.
+	defaultDBMaxConnLifetime = 30 * time.Minute
 )
 
 // bounds — допустимый диапазон для duration-переменной. Верхняя граница ловит
@@ -96,6 +136,38 @@ type bounds struct{ min, max time.Duration }
 // «без глобальных переменных»: её никто не изменяет (как io.EOF в stdlib).
 var errEmpty = errors.New("set but empty")
 
+// redacted — то, что видят fmt, slog и json вместо секрета.
+const redacted = "[REDACTED]"
+
+// Secret — строка, которая не печатается: fmt (любой глагол), slog и
+// encoding/json видят "[REDACTED]". Значение достаётся только явным вызовом
+// Reveal — его легко найти grep'ом при ревью.
+//
+// Структура, а не type Secret string: конверсия string(secret) в обход
+// Reveal не компилируется.
+type Secret struct{ v string }
+
+// Format реализует fmt.Formatter. String и GoString недостаточно: для %d,
+// %o и т.п. fmt их не вызывает и печатает поля структуры через reflection —
+// вместе со значением (это поймал TestSecret_NeverPrinted).
+func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
+
+// Reveal возвращает значение секрета. Вызывать только там, где значение
+// передаётся потребителю (драйверу БД), и никогда — для логов и ошибок.
+func (s Secret) Reveal() string { return s.v }
+
+// String реализует fmt.Stringer.
+func (Secret) String() string { return redacted }
+
+// GoString реализует fmt.GoStringer (%#v).
+func (Secret) GoString() string { return redacted }
+
+// LogValue реализует slog.LogValuer.
+func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
+
+// MarshalText реализует encoding.TextMarshaler (json, xml).
+func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
+
 // Config — значение, а не указатель: после Load() он иммутабелен
 // и передаётся копией.
 type Config struct {
@@ -104,10 +176,17 @@ type Config struct {
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
+	HandlerTimeout    time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
 	DrainDelay        time.Duration
 	LogLevel          slog.Level
+
+	DBDSN              Secret // не логируется даже через LogValue
+	DBMaxConns         int32
+	DBConnectTimeout   time.Duration
+	DBStatementTimeout time.Duration
+	DBMaxConnLifetime  time.Duration
 }
 
 // LogValue реализует slog.LogValuer по принципу allowlist: в лог попадают
@@ -120,10 +199,15 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("read_header_timeout", c.ReadHeaderTimeout),
 		slog.Duration("read_timeout", c.ReadTimeout),
 		slog.Duration("write_timeout", c.WriteTimeout),
+		slog.Duration("handler_timeout", c.HandlerTimeout),
 		slog.Duration("idle_timeout", c.IdleTimeout),
 		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
 		slog.Duration("drain_delay", c.DrainDelay),
 		slog.String("log_level", c.LogLevel.String()),
+		slog.Int("db_max_conns", int(c.DBMaxConns)),
+		slog.Duration("db_connect_timeout", c.DBConnectTimeout),
+		slog.Duration("db_statement_timeout", c.DBStatementTimeout),
+		slog.Duration("db_max_conn_lifetime", c.DBMaxConnLifetime),
 	)
 }
 
@@ -143,6 +227,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	rht, rhtOK := l.duration(keyReadHeaderTimeout, defaultReadHeaderTimeout, bounds{time.Second, 10 * time.Second})
 	rt, rtOK := l.duration(keyReadTimeout, defaultReadTimeout, bounds{time.Second, time.Minute})
 	wt, wtOK := l.duration(keyWriteTimeout, defaultWriteTimeout, bounds{time.Second, time.Minute})
+	ht, htOK := l.duration(keyHandlerTimeout, defaultHandlerTimeout, bounds{time.Second, time.Minute})
 	it, _ := l.duration(keyIdleTimeout, defaultIdleTimeout, bounds{10 * time.Second, 5 * time.Minute})
 	st, stOK := l.duration(keyShutdownTimeout, defaultShutdownTimeout, bounds{time.Second, stopBudget})
 
@@ -154,16 +239,28 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 
 	lvl, lvlOK := l.logLevel(keyLogLevel, defaultLogLevel)
 
+	dsn := l.secret(keyDBDSN)
+	maxConns, _ := l.intRange(keyDBMaxConns, defaultDBMaxConns, 1, 100)
+	dbct, _ := l.duration(keyDBConnectTimeout, defaultDBConnectTimeout, bounds{time.Second, 30 * time.Second})
+	dbst, dbstOK := l.duration(keyDBStatementTimeout, defaultDBStatementTimeout, bounds{100 * time.Millisecond, time.Minute})
+	dblt, _ := l.duration(keyDBMaxConnLifetime, defaultDBMaxConnLifetime, bounds{time.Minute, 24 * time.Hour})
+
 	// Этап 2: кросс-полевые инварианты — только если все участники валидны.
 	// Иначе одна опечатка порождает каскад ложных ошибок про соседние поля.
 	if rhtOK && rtOK && rht > rt {
 		l.fail(keyReadHeaderTimeout, fmt.Errorf("must be <= %s", keyReadTimeout))
+	}
+	if htOK && wtOK && ht >= wt {
+		l.fail(keyHandlerTimeout, fmt.Errorf("must be < %s, otherwise the connection is cut before the 503 is written", keyWriteTimeout))
 	}
 	if stOK && wtOK && st < wt {
 		l.fail(keyShutdownTimeout, fmt.Errorf("must be >= %s, otherwise in-flight requests are cut", keyWriteTimeout))
 	}
 	if stOK && ddOK && st+dd > stopBudget {
 		l.fail(keyShutdownTimeout, fmt.Errorf("%s + %s must be <= %s (orchestrator grace period minus close reserve)", keyShutdownTimeout, keyDrainDelay, stopBudget))
+	}
+	if dbstOK && htOK && dbst >= ht {
+		l.fail(keyDBStatementTimeout, fmt.Errorf("must be < %s: a query that outlives the handler is wasted work holding a connection", keyHandlerTimeout))
 	}
 	if envOK && lvlOK && env == EnvProd && lvl < slog.LevelInfo {
 		l.fail(keyLogLevel, errors.New("levels below info are forbidden in prod: debug logs end up containing PHI"))
@@ -179,11 +276,42 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		ReadHeaderTimeout: rht,
 		ReadTimeout:       rt,
 		WriteTimeout:      wt,
+		HandlerTimeout:    ht,
 		IdleTimeout:       it,
 		ShutdownTimeout:   st,
 		DrainDelay:        dd,
 		LogLevel:          lvl,
+
+		DBDSN:              dsn,
+		DBMaxConns:         maxConns,
+		DBConnectTimeout:   dbct,
+		DBStatementTimeout: dbst,
+		DBMaxConnLifetime:  dblt,
 	}, nil
+}
+
+// Migrate — конфиг cmd/migrate. Отдельный от Config: мигратору не нужны
+// HTTP-настройки, а API не должен знать DSN владельца схемы.
+type Migrate struct {
+	// Env решает, обязателен ли TLS до БД (вне dev — да) и формат логов.
+	Env Env
+	// DSN роли-владельца схемы. У API своя роль без прав на DDL.
+	DSN Secret
+}
+
+// LoadMigrate читает конфиг мигратора из окружения процесса.
+func LoadMigrate() (Migrate, error) {
+	return loadMigrate(os.LookupEnv)
+}
+
+func loadMigrate(lookup func(string) (string, bool)) (Migrate, error) {
+	l := &loader{lookup: lookup}
+	env, _ := l.env(keyEnv)
+	dsn := l.secret(keyMigrateDSN)
+	if err := errors.Join(l.errs...); err != nil {
+		return Migrate{}, err
+	}
+	return Migrate{Env: env, DSN: dsn}, nil
 }
 
 // loader накапливает ошибки, чтобы оператор увидел их все сразу.
@@ -282,6 +410,39 @@ func (l *loader) duration(key string, def time.Duration, b bounds) (time.Duratio
 		return 0, false
 	}
 	return d, true
+}
+
+// secret читает обязательную секретную переменную. Ошибки не содержат
+// значения: required и errEmpty его не упоминают, а парсинг DSN делает
+// драйвер и возвращает ошибку без %w (см. platform/postgres).
+//
+// Возвращает только значение: у секретов нет кросс-полевых инвариантов,
+// и признак валидности никому не нужен.
+func (l *loader) secret(key string) Secret {
+	s, _ := l.required(key)
+	return Secret{v: s}
+}
+
+// intRange парсит целое и проверяет диапазон [lo, hi].
+func (l *loader) intRange(key string, def, lo, hi int32) (int32, bool) {
+	s, ok := l.lookup(key)
+	if !ok {
+		return def, true
+	}
+	if s == "" {
+		l.fail(key, errEmpty)
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		l.fail(key, err)
+		return 0, false
+	}
+	if v := int32(n); v < lo || v > hi {
+		l.fail(key, fmt.Errorf("%d is out of range [%d, %d]", v, lo, hi))
+		return 0, false
+	}
+	return int32(n), true
 }
 
 func (l *loader) logLevel(key, def string) (slog.Level, bool) {

@@ -1,0 +1,5 @@
+cover.out
+
+# Локальные пароли БД (make db-env) и локальные переопределения compose.
+.env
+docker-compose.override.yml

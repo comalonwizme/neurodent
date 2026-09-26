@@ -1,0 +1,34 @@
+# Локальный Postgres для разработки. Только dev: порт слушает 127.0.0.1,
+# пароли — из локального .env (создаёт `make db-env`, файл в .gitignore).
+# Локальные переопределения — в docker-compose.override.yml (тоже в .gitignore).
+name: neurodent
+
+services:
+  postgres:
+    # Та же версия, что в integration-тестах (tests/integration сверяет строку).
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${NEURODENT_PG_SUPERUSER_PASSWORD:?run "make db-env" first}
+      NEURODENT_PG_OWNER_PASSWORD: ${NEURODENT_PG_OWNER_PASSWORD:?run "make db-env" first}
+      NEURODENT_PG_APP_PASSWORD: ${NEURODENT_PG_APP_PASSWORD:?run "make db-env" first}
+    ports:
+      - "127.0.0.1:${NEURODENT_PG_PORT:-5432}:5432"
+    volumes:
+      # С Postgres 18 образ хранит данные в /var/lib/postgresql/18/docker;
+      # том монтируется на родительский каталог.
+      - pgdata:/var/lib/postgresql
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: во время init сервер слушает только unix-сокет, так что
+      # проверка по TCP проходит лишь после завершения init-скриптов.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d neurodent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  pgdata:

@@ -1,3 +1,5 @@
+// Команда api — HTTP API NeuroDent: читает конфиг из окружения, собирает
+// приложение (internal/app) и работает до SIGINT/SIGTERM.
 package main
 
 import (
@@ -8,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/comalonwizme/neurodent/internal/app"
-	"github.com/comalonwizme/neurodent/internal/config"
+	"github.com/comalonwizme/neurodent/backend/internal/app"
+	"github.com/comalonwizme/neurodent/backend/internal/config"
 )
 
 // main отвечает только за код возврата. os.Exit — только здесь: он не
@@ -38,7 +40,7 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	a, err := app.New(cfg, os.Stdout)
+	a, err := app.New(ctx, cfg, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)
 	}
