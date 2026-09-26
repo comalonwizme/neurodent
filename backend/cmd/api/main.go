@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/comalonwizme/neurodent/internal/app"
-	"github.com/comalonwizme/neurodent/internal/config"
+	"github.com/comalonwizme/neurodent/backend/internal/app"
+	"github.com/comalonwizme/neurodent/backend/internal/config"
 )
 
 // main отвечает только за код возврата. os.Exit — только здесь: он не

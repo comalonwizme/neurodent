@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/comalonwizme/neurodent/internal/config"
-	"github.com/comalonwizme/neurodent/internal/platform/health"
-	"github.com/comalonwizme/neurodent/internal/platform/httpserver"
-	"github.com/comalonwizme/neurodent/internal/platform/logger"
+	"github.com/comalonwizme/neurodent/backend/internal/config"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/httpserver"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/logger"
 )
 
 type App struct {
