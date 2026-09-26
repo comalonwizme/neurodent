@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/neurodent/neurodent/backend/internal/config"
-	"github.com/neurodent/neurodent/backend/internal/platform/health"
-	"github.com/neurodent/neurodent/backend/internal/platform/httpserver"
-	"github.com/neurodent/neurodent/backend/internal/platform/logger"
+	"github.com/comalonwizme/neurodent/internal/config"
+	"github.com/comalonwizme/neurodent/internal/platform/health"
+	"github.com/comalonwizme/neurodent/internal/platform/httpserver"
+	"github.com/comalonwizme/neurodent/internal/platform/logger"
 )
 
 type App struct {
@@ -141,5 +141,5 @@ func newLogger(cfg config.Config, w io.Writer) *slog.Logger {
 	if cfg.Env == config.EnvDev {
 		format = logger.FormatText
 	}
-	return logger.New(w, format, cfg.LogLevel)
+	return logger.New(w, cfg.LogLevel, format)
 }
