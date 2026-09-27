@@ -1,95 +1,24 @@
-// Package audit — журнал аудита (ADR-0014): кто, в какой клинике, что
-// сделал или пытался сделать, с каким ресурсом, когда и чем кончилось.
-//
-// В событии нет ни одного поля «строка по выбору вызывающего»: коды
-// проверяются по формату, ресурс — UUID. Клинику и субъект события
-// вызывающий не передаёт — их подставляет БД из параметров транзакции.
+// Package audit — реализация журнала аудита на Postgres (ADR-0014).
+// Типы события и интерфейс — в shared/audit: use cases зависят от них, а
+// не от этого пакета.
 package audit
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/comalonwizme/neurodent/backend/internal/platform/audit/auditdb"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
-	"github.com/comalonwizme/neurodent/backend/internal/shared/apperr"
+	sharedaudit "github.com/comalonwizme/neurodent/backend/internal/shared/audit"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/clock"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/id"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/scope"
 )
 
-// ErrInvalidEvent — событие не прошло проверку формата.
-var ErrInvalidEvent = errors.New("invalid audit event")
-
-// Action — код действия <модуль>.<ресурс>.<глагол>: iam.session.created.
-type Action string
-
-// ResourceType — код типа ресурса <модуль>.<ресурс>: iam.session.
-type ResourceType string
-
-// Outcome — чем закончилось действие.
-type Outcome string
-
-// Исходы действия.
-const (
-	Success Outcome = "success"
-	Denied  Outcome = "denied" // отказ в доступе: forbidden, unauthenticated
-	Failed  Outcome = "failed" // любая другая ошибка
-)
-
-// maxCodeLen — то же ограничение, что CHECK в таблице.
-const maxCodeLen = 100
-
-// Event — событие журнала.
-type Event struct {
-	Action       Action
-	ResourceType ResourceType
-	ResourceID   id.ID // нулевой — событие без конкретного ресурса
-	Outcome      Outcome
-}
-
-// Validate проверяет формат кодов — те же правила, что CHECK в БД.
-func (e Event) Validate() error {
-	if !validCode(string(e.Action), 3) {
-		return fmt.Errorf("%w: action %q must be <module>.<resource>.<verb>", ErrInvalidEvent, e.Action)
-	}
-	if !validCode(string(e.ResourceType), 2) {
-		return fmt.Errorf("%w: resource type %q must be <module>.<resource>", ErrInvalidEvent, e.ResourceType)
-	}
-	switch e.Outcome {
-	case Success, Denied, Failed:
-	default:
-		return fmt.Errorf("%w: outcome %q", ErrInvalidEvent, e.Outcome)
-	}
-	return nil
-}
-
-// validCode: ровно segments сегментов через точку, каждый [a-z][a-z0-9_]*.
-func validCode(s string, segments int) bool {
-	if s == "" || len(s) > maxCodeLen {
-		return false
-	}
-	n := 0
-	for part := range strings.SplitSeq(s, ".") {
-		n++
-		if part == "" || part[0] < 'a' || part[0] > 'z' {
-			return false
-		}
-		for i := 1; i < len(part); i++ {
-			if !isCodeChar(part[i]) {
-				return false
-			}
-		}
-	}
-	return n == segments
-}
-
-func isCodeChar(c byte) bool {
-	return 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '_'
-}
+// Проверка на компиляции: реализация удовлетворяет порту.
+var _ sharedaudit.Recorder = (*Recorder)(nil)
 
 // Recorder пишет события.
 type Recorder struct {
@@ -105,7 +34,7 @@ func NewRecorder(db *postgres.DB, c clock.Clock) *Recorder {
 // Record пишет событие в текущей транзакции (postgres.Tx; без неё —
 // postgres.ErrNoTx). Событие и действие коммитятся или откатываются вместе.
 // Клиника и субъект — из scope этой транзакции.
-func (r *Recorder) Record(ctx context.Context, ev Event) error {
+func (r *Recorder) Record(ctx context.Context, ev sharedaudit.Event) error {
 	if err := ev.Validate(); err != nil {
 		return err
 	}
@@ -139,7 +68,7 @@ func (r *Recorder) Record(ctx context.Context, ev Event) error {
 // БД проверяет только согласованность события с переданным sc, а не его
 // правдивость (ADR-0014). Предпочитайте Do: там scope действия и события
 // отказа — одно значение по построению.
-func (r *Recorder) RecordOutcome(ctx context.Context, sc scope.Scope, ev Event) error {
+func (r *Recorder) RecordOutcome(ctx context.Context, sc scope.Scope, ev sharedaudit.Event) error {
 	return r.db.WithinStandaloneTx(ctx, sc, func(ctx context.Context) error {
 		return r.Record(ctx, ev)
 	})
@@ -152,11 +81,11 @@ func (r *Recorder) RecordOutcome(ctx context.Context, sc scope.Scope, ev Event) 
 //
 // Возвращает ошибку fn. Do владеет транзакцией: внутри другой транзакции —
 // postgres.ErrInsideTx.
-func (r *Recorder) Do(ctx context.Context, sc scope.Scope, ev Event, fn func(ctx context.Context) error) error {
+func (r *Recorder) Do(ctx context.Context, sc scope.Scope, ev sharedaudit.Event, fn func(ctx context.Context) error) error {
 	if postgres.InTx(ctx) {
 		return postgres.ErrInsideTx
 	}
-	ev.Outcome = Success
+	ev.Outcome = sharedaudit.Success
 	if err := ev.Validate(); err != nil {
 		return err
 	}
@@ -169,19 +98,9 @@ func (r *Recorder) Do(ctx context.Context, sc scope.Scope, ev Event, fn func(ctx
 	if err == nil {
 		return nil
 	}
-	ev.Outcome = OutcomeOf(err)
+	ev.Outcome = sharedaudit.OutcomeOf(err)
 	if recErr := r.RecordOutcome(ctx, sc, ev); recErr != nil {
 		return errors.Join(err, fmt.Errorf("record audit outcome: %w", recErr))
 	}
 	return err
-}
-
-// OutcomeOf классифицирует ошибку действия для журнала.
-func OutcomeOf(err error) Outcome {
-	switch apperr.KindOf(err) {
-	case apperr.Forbidden, apperr.Unauthenticated:
-		return Denied
-	default:
-		return Failed
-	}
 }

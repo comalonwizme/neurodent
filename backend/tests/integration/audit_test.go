@@ -14,6 +14,7 @@ import (
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/apperr"
+	sharedaudit "github.com/comalonwizme/neurodent/backend/internal/shared/audit"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/clock"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/id"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/scope"
@@ -59,8 +60,8 @@ func testAudit(t *testing.T, env *pgEnv) {
 	ctx := t.Context()
 	fixed := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	rec := audit.NewRecorder(env.db, clock.NewManual(fixed))
-	ev := func(resource id.ID) audit.Event {
-		return audit.Event{Action: "platform.probe.written", ResourceType: "platform.probe", ResourceID: resource, Outcome: audit.Success}
+	ev := func(resource id.ID) sharedaudit.Event {
+		return sharedaudit.Event{Action: "platform.probe.written", ResourceType: "platform.probe", ResourceID: resource, Outcome: sharedaudit.Success}
 	}
 
 	t.Run("app role can only insert", func(t *testing.T) {
@@ -203,7 +204,7 @@ func testAudit(t *testing.T, env *pgEnv) {
 		// Событие вне клиники: оба tenant NULL — IS NOT DISTINCT FROM пропускает.
 		resource := id.New()
 		if err := env.db.WithinTx(ctx, scope.Global(scope.Anonymous()), func(ctx context.Context) error {
-			return rec.Record(ctx, audit.Event{Action: "iam.login.attempted", ResourceType: "iam.session", ResourceID: resource, Outcome: audit.Denied})
+			return rec.Record(ctx, sharedaudit.Event{Action: "iam.login.attempted", ResourceType: "iam.session", ResourceID: resource, Outcome: sharedaudit.Denied})
 		}); err != nil {
 			t.Errorf("global anonymous event rejected: %v", err)
 		}

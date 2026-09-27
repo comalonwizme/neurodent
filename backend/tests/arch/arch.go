@@ -43,6 +43,7 @@ const (
 	RuleLayer          = "layer"             // platform и shared не видят modules; shared — только stdlib + shared
 	RuleModuleCycle    = "module-cycle"      // граф модулей ацикличен
 	RuleTimeNow        = "time-now"          // domain и app берут время из shared/clock
+	RuleModuleLayout   = "module-layout"     // в модуле только пакеты шаблона ADR-0012
 )
 
 type role int
@@ -165,6 +166,9 @@ func (c *checker) file(abs, rel string) error {
 		return fmt.Errorf("parse %s: %w", rel, err)
 	}
 	from := classify(path.Dir(rel))
+	if from.role == roleModuleOther {
+		c.add(rel, RuleModuleLayout, "package %s is not part of the module template: use contract/ or internal/{domain,app,ports,adapters/postgres,adapters/http}", path.Dir(rel))
+	}
 	timeNames := map[string]bool{}
 	for _, spec := range f.Imports {
 		imp, err := strconv.Unquote(spec.Path.Value)

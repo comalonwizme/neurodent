@@ -64,6 +64,9 @@ func TestFixtures(t *testing.T) {
 		"time_since_app_alias":     {arch.RuleTimeNow},
 		"time_now_in_test":         {arch.RuleTimeNow},
 		"module_cycle":             {arch.RuleModuleCycle},
+		"unknown_package":          {arch.RuleModuleLayout},
+		"unknown_adapter":          {arch.RuleModuleLayout},
+		"unknown_internal_root":    {arch.RuleModuleLayout},
 	}
 
 	dirs, err := os.ReadDir("testdata")

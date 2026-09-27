@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/comalonwizme/neurodent/backend/internal/shared/scope"
+	"github.com/comalonwizme/neurodent/backend/internal/shared/txn"
 )
 
 // Ошибки транзакций (ADR-0012). Все — ошибки программиста, а не клиента:
@@ -22,6 +23,9 @@ var (
 	ErrInsideTx        = errors.New("must be called outside a transaction: the write must not roll back with it")
 	ErrTxConcurrentUse = errors.New("transaction used concurrently: a pgx transaction is a single connection")
 )
+
+// Проверка на компиляции: DB — реализация порта транзакций для use cases.
+var _ txn.Runner = (*DB)(nil)
 
 // rollbackTimeout — бюджет на откат, когда контекст запроса уже отменён.
 const rollbackTimeout = 5 * time.Second
