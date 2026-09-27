@@ -26,10 +26,13 @@ func lookupFrom(m map[string]string) func(string) (string, bool) {
 // и форматированный вывод.
 const testDSN = "postgres://app:s3cr3t-pw@db.internal:5432/neurodent"
 
+// testOrigins — origin браузерного клиента для окружений вне dev.
+const testOrigins = "https://app.neurodent.example"
+
 // withEnv — окружение staging плюс переопределения. Staging выбран базой,
 // потому что у него ненулевой DrainDelay и все инварианты работают.
 func withEnv(kv ...string) map[string]string {
-	m := map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"}
+	m := map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins}
 	for i := 0; i < len(kv); i += 2 {
 		m[kv[i]] = kv[i+1]
 	}
@@ -68,7 +71,7 @@ func TestLoad_Valid(t *testing.T) {
 		},
 		{
 			name: "staging on defaults drains for 2s",
-			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins},
 			want: Config{
 				Env:               "staging",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -85,12 +88,13 @@ func TestLoad_Valid(t *testing.T) {
 				DBMaxConns:         10,
 				DBConnectTimeout:   5 * time.Second,
 				DBStatementTimeout: 5 * time.Second,
+				CORSAllowedOrigins: Origins{joined: testOrigins},
 				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
 		{
 			name: "prod with info level",
-			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "info"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins, "NEURODENT_LOG_LEVEL": "info"},
 			want: Config{
 				Env:               "prod",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -107,6 +111,7 @@ func TestLoad_Valid(t *testing.T) {
 				DBMaxConns:         10,
 				DBConnectTimeout:   5 * time.Second,
 				DBStatementTimeout: 5 * time.Second,
+				CORSAllowedOrigins: Origins{joined: testOrigins},
 				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
@@ -182,6 +187,7 @@ func TestLoad_Valid(t *testing.T) {
 				DBMaxConns:         1,
 				DBConnectTimeout:   time.Second,
 				DBStatementTimeout: 100 * time.Millisecond,
+				CORSAllowedOrigins: Origins{joined: testOrigins},
 				DBMaxConnLifetime:  time.Minute,
 			},
 		},
@@ -215,6 +221,7 @@ func TestLoad_Valid(t *testing.T) {
 				DBMaxConns:         100,
 				DBConnectTimeout:   30 * time.Second,
 				DBStatementTimeout: 5 * time.Second,
+				CORSAllowedOrigins: Origins{joined: testOrigins},
 				DBMaxConnLifetime:  24 * time.Hour,
 			},
 		},
@@ -241,6 +248,7 @@ func TestLoad_Valid(t *testing.T) {
 				DBMaxConns:         10,
 				DBConnectTimeout:   5 * time.Second,
 				DBStatementTimeout: 5 * time.Second,
+				CORSAllowedOrigins: Origins{joined: testOrigins},
 				DBMaxConnLifetime:  30 * time.Minute,
 			},
 		},
@@ -464,7 +472,7 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "prod with debug",
-			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "debug"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins, "NEURODENT_LOG_LEVEL": "debug"},
 			wantKeys: []string{"NEURODENT_LOG_LEVEL"},
 		},
 
@@ -541,6 +549,36 @@ func TestLoad_Errors(t *testing.T) {
 			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "abc", "NEURODENT_DB_STATEMENT_TIMEOUT", "9s"),
 			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
 		},
+
+		// CORS (ADR-0015).
+		{
+			name:     "origins missing in staging",
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"},
+			wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+		},
+		{
+			name:     "origins missing in prod",
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod"},
+			wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+		},
+		{
+			name:      "origins set but empty",
+			env:       withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", ""),
+			wantKeys:  []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+			wantEmpty: true,
+		},
+		{name: "origin wildcard", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "*"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin null", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "null"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with path", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example/login"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with trailing slash", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example/"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with query", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example?x=1"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin uppercase", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://App.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin default port", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example:443"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin without scheme", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin ftp", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "ftp://app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "empty element", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://a.example,,https://b.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "duplicate origin", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://a.example, https://a.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "http origin outside dev", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "http://app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
 
 		// Адрес (N2).
 		{
@@ -628,6 +666,7 @@ func TestConfig_LogValue(t *testing.T) {
 	// Ровно этот набор. Новое поле в логе — осознанное решение, которое
 	// должно пройти через этот список.
 	want := []string{
+		"cors_allowed_origins",
 		"db_connect_timeout",
 		"db_max_conn_lifetime",
 		"db_max_conns",
@@ -662,14 +701,15 @@ func FuzzLoad(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, env, rht, rt, wt, ht, st, dd string) {
 		cfg, err := load(lookupFrom(map[string]string{
-			"NEURODENT_DB_DSN":              testDSN,
-			"NEURODENT_ENV":                 env,
-			"NEURODENT_READ_HEADER_TIMEOUT": rht,
-			"NEURODENT_READ_TIMEOUT":        rt,
-			"NEURODENT_WRITE_TIMEOUT":       wt,
-			"NEURODENT_HANDLER_TIMEOUT":     ht,
-			"NEURODENT_SHUTDOWN_TIMEOUT":    st,
-			"NEURODENT_DRAIN_DELAY":         dd,
+			"NEURODENT_DB_DSN":               testDSN,
+			"NEURODENT_ENV":                  env,
+			"NEURODENT_READ_HEADER_TIMEOUT":  rht,
+			"NEURODENT_READ_TIMEOUT":         rt,
+			"NEURODENT_WRITE_TIMEOUT":        wt,
+			"NEURODENT_HANDLER_TIMEOUT":      ht,
+			"NEURODENT_SHUTDOWN_TIMEOUT":     st,
+			"NEURODENT_DRAIN_DELAY":          dd,
+			"NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins,
 		}))
 		if err != nil {
 			return
@@ -774,5 +814,23 @@ func TestLoadMigrate(t *testing.T) {
 	}
 	if got.Env != "prod" || got.DSN.Reveal() != testDSN {
 		t.Errorf("loadMigrate() = %v, %q", got.Env, got.DSN.Reveal())
+	}
+}
+
+func TestLoad_DevAllowsHTTPOriginsAndEmptyList(t *testing.T) {
+	cfg, err := load(lookupFrom(map[string]string{
+		"NEURODENT_DB_DSN":               testDSN,
+		"NEURODENT_ENV":                  "dev",
+		"NEURODENT_CORS_ALLOWED_ORIGINS": "http://localhost:4200, https://app.neurodent.example",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.CORSAllowedOrigins.List(); !slices.Equal(got, []string{"http://localhost:4200", "https://app.neurodent.example"}) {
+		t.Errorf("origins = %v", got)
+	}
+	cfg, err = load(lookupFrom(map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"}))
+	if err != nil || cfg.CORSAllowedOrigins.List() != nil {
+		t.Errorf("dev without origins: %v, %v", cfg.CORSAllowedOrigins.List(), err)
 	}
 }

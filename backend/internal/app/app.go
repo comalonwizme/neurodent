@@ -68,10 +68,14 @@ func New(ctx context.Context, cfg config.Config, logOut io.Writer) (a *App, err 
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, a.log, a.probe)
-	handler := newRouter(mux, a.log, routerOptions{
+	handler, err := newRouter(mux, a.log, routerOptions{
 		handlerTimeout: cfg.HandlerTimeout,
 		hsts:           cfg.Env != config.EnvDev,
+		corsOrigins:    cfg.CORSAllowedOrigins.List(),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("router: %w", err)
+	}
 
 	a.server = httpserver.New(httpserver.Options{
 		Addr:              cfg.HTTPAddr,

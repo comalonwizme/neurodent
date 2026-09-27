@@ -8,8 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,6 +49,8 @@ const (
 	keyDBMaxConnLifetime  = "NEURODENT_DB_MAX_CONN_LIFETIME"
 
 	keyMigrateDSN = "NEURODENT_MIGRATE_DSN"
+
+	keyCORSAllowedOrigins = "NEURODENT_CORS_ALLOWED_ORIGINS"
 )
 
 // Бюджет остановки процесса.
@@ -187,6 +192,23 @@ type Config struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 	DBMaxConnLifetime  time.Duration
+
+	// Origin браузерного клиента (ADR-0015): CORS с credentials и доверенные
+	// origin для защиты от CSRF. Пусто — только в dev (Angular dev-server
+	// проксирует API, запросы same-origin).
+	CORSAllowedOrigins Origins
+}
+
+// Origins — список origin вида scheme://host[:port]. Хранится строкой,
+// чтобы Config оставался сравнимым (тесты сравнивают его целиком).
+type Origins struct{ joined string }
+
+// List возвращает origin по одному.
+func (o Origins) List() []string {
+	if o.joined == "" {
+		return nil
+	}
+	return strings.Split(o.joined, ",")
 }
 
 // LogValue реализует slog.LogValuer по принципу allowlist: в лог попадают
@@ -208,6 +230,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("db_connect_timeout", c.DBConnectTimeout),
 		slog.Duration("db_statement_timeout", c.DBStatementTimeout),
 		slog.Duration("db_max_conn_lifetime", c.DBMaxConnLifetime),
+		slog.String("cors_allowed_origins", c.CORSAllowedOrigins.joined),
 	)
 }
 
@@ -245,6 +268,8 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	dbst, dbstOK := l.duration(keyDBStatementTimeout, defaultDBStatementTimeout, bounds{100 * time.Millisecond, time.Minute})
 	dblt, _ := l.duration(keyDBMaxConnLifetime, defaultDBMaxConnLifetime, bounds{time.Minute, 24 * time.Hour})
 
+	origins, originsOK := l.origins(keyCORSAllowedOrigins)
+
 	// Этап 2: кросс-полевые инварианты — только если все участники валидны.
 	// Иначе одна опечатка порождает каскад ложных ошибок про соседние поля.
 	if rhtOK && rtOK && rht > rt {
@@ -261,6 +286,16 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if dbstOK && htOK && dbst >= ht {
 		l.fail(keyDBStatementTimeout, fmt.Errorf("must be < %s: a query that outlives the handler is wasted work holding a connection", keyHandlerTimeout))
+	}
+	if envOK && originsOK && env != EnvDev {
+		if origins.joined == "" {
+			l.fail(keyCORSAllowedOrigins, errors.New("required outside dev: the browser client needs CORS and CSRF trusted origins"))
+		}
+		for _, o := range origins.List() {
+			if strings.HasPrefix(o, "http://") {
+				l.fail(keyCORSAllowedOrigins, fmt.Errorf("origin %q: only https outside dev", o))
+			}
+		}
 	}
 	if envOK && lvlOK && env == EnvProd && lvl < slog.LevelInfo {
 		l.fail(keyLogLevel, errors.New("levels below info are forbidden in prod: debug logs end up containing PHI"))
@@ -287,6 +322,8 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		DBConnectTimeout:   dbct,
 		DBStatementTimeout: dbst,
 		DBMaxConnLifetime:  dblt,
+
+		CORSAllowedOrigins: origins,
 	}, nil
 }
 
@@ -443,6 +480,59 @@ func (l *loader) intRange(key string, def, lo, hi int32) (int32, bool) {
 		return 0, false
 	}
 	return int32(n), true
+}
+
+// origins разбирает список origin через запятую. Не задано — пустой список
+// (обязательность зависит от окружения — второй этап). Задано пустым —
+// ошибка, как у остальных переменных.
+//
+// Формат строгий: браузер присылает Origin в каноническом виде (нижний
+// регистр, без пути и порта по умолчанию), а сравнение — точное. Любое
+// отклонение в конфиге означало бы origin, который никогда не совпадёт.
+func (l *loader) origins(key string) (Origins, bool) {
+	s, ok := l.lookup(key)
+	if !ok {
+		return Origins{}, true
+	}
+	if s == "" {
+		l.fail(key, errEmpty)
+		return Origins{}, false
+	}
+	var list []string
+	for _, raw := range strings.Split(s, ",") {
+		o := strings.TrimSpace(raw)
+		if err := checkOrigin(o); err != nil {
+			l.fail(key, err)
+			return Origins{}, false
+		}
+		if slices.Contains(list, o) {
+			l.fail(key, fmt.Errorf("duplicate origin %q", o))
+			return Origins{}, false
+		}
+		list = append(list, o)
+	}
+	return Origins{joined: strings.Join(list, ",")}, true
+}
+
+func checkOrigin(o string) error {
+	if o == "" {
+		return errors.New("empty origin in the list")
+	}
+	if o == "*" || o == "null" {
+		return fmt.Errorf("origin %q is not allowed: with credentials only exact origins are valid", o)
+	}
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.HasSuffix(o, "/") {
+		return fmt.Errorf("origin %q must be scheme://host[:port] without path, query or trailing slash", o)
+	}
+	if o != strings.ToLower(o) {
+		return fmt.Errorf("origin %q must be lowercase: browsers send origins in lowercase", o)
+	}
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		return fmt.Errorf("origin %q: drop the default port, browsers omit it", o)
+	}
+	return nil
 }
 
 func (l *loader) logLevel(key, def string) (slog.Level, bool) {
