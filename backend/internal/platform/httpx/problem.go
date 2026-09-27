@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/comalonwizme/neurodent/backend/internal/shared/apperr"
 )
@@ -81,6 +84,16 @@ func WriteError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 		// 4xx — ошибка клиента, в проде (уровень info) не пишется: статус
 		// уже есть в access-логе, а текст может содержать ввод клиента.
 		log.DebugContext(r.Context(), "request rejected", "status", status, "err", err)
+	}
+
+	// Ошибка знает, когда повторить (лимиты, ADR-0016): Retry-After в целых
+	// секундах, округление вверх, минимум 1.
+	if ra, ok := errors.AsType[interface {
+		error
+		RetryAfter() time.Duration
+	}](err); ok {
+		secs := max(int(math.Ceil(ra.RetryAfter().Seconds())), 1)
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}
 
 	WriteProblem(w, r, status, code, detail)

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/comalonwizme/neurodent/backend/internal/gen/platformapi"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
@@ -268,5 +269,34 @@ func TestParamErrorHandler(t *testing.T) {
 				t.Errorf("parameter value echoed to the client: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+type retryAfterError struct{ d time.Duration }
+
+func (e retryAfterError) Error() string             { return "slow down" }
+func (e retryAfterError) RetryAfter() time.Duration { return e.d }
+
+func TestWriteError_RetryAfter(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "30"},
+		{1500 * time.Millisecond, "2"}, // вверх: раньше повторять бессмысленно
+		{0, "1"},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		err := apperr.Wrap(apperr.RateLimited, "too many requests", retryAfterError{tt.d})
+		httpx.WriteError(rec, requestWithID("r"), slog.New(slog.DiscardHandler), err)
+		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != tt.want {
+			t.Errorf("%s: status %d Retry-After %q, want 429 %q", tt.d, rec.Code, rec.Header().Get("Retry-After"), tt.want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	httpx.WriteError(rec, requestWithID("r"), slog.New(slog.DiscardHandler), apperr.New(apperr.RateLimited, ""))
+	if rec.Header().Get("Retry-After") != "" {
+		t.Error("Retry-After without a RetryAfter error")
 	}
 }

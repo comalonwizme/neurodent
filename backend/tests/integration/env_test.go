@@ -60,6 +60,7 @@ func TestPostgres(t *testing.T) {
 	t.Run("classes", func(t *testing.T) { testClasses(t, env) })
 	t.Run("sqlc", func(t *testing.T) { testSQLC(t, env) })
 	t.Run("audit", func(t *testing.T) { testAudit(t, env) })
+	t.Run("ratelimit", func(t *testing.T) { testRateLimit(t, env) })
 	t.Run("pool", func(t *testing.T) { testPool(t, env) })
 }
 

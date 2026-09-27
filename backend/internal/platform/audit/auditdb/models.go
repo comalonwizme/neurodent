@@ -25,6 +25,14 @@ type AuditEvent struct {
 	RequestID    *string
 }
 
+// class=cell-global; Rate limit counters (ADR-0016): HMAC keys only, no personal data.
+type PlatformRateLimitCounter struct {
+	Key         []byte
+	WindowStart time.Time
+	Hits        int32
+	ExpiresAt   time.Time
+}
+
 // class=tenant; TECHNICAL: RLS probe of the tenant class for platform integration tests. Not business data.
 type PlatformRlsProbe struct {
 	ID       id.ID

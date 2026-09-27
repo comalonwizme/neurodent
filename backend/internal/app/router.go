@@ -24,6 +24,7 @@ type routerOptions struct {
 	handlerTimeout time.Duration
 	hsts           bool
 	corsOrigins    []string
+	rateLimit      middleware.RateLimitOptions
 }
 
 // registerRoutes — единственное место, где маршруты попадают на mux.
@@ -61,12 +62,14 @@ func (a platformAPI) GetReadyz(w http.ResponseWriter, r *http.Request)  { a.prob
 //     сам, не доходя до хендлера.
 //  6. CrossOrigin (CSRF) — preflight уже отвечен; отвергнутая подделка не
 //     доходит до лимитов и хендлера.
-//     Место [Auth] (IAM) — здесь, до RateLimit (ключ лимита зависит от
-//     клиента, ADR-0016). RateLimit — здесь же, до BodyLimit и Timeout.
-//  7. BodyLimit — до Timeout: 413 по Content-Length без goroutine хендлера.
-//  8. Timeout — ближе всех к хендлеру: бюджет тратится только на хендлер;
+//     Место [Auth] (IAM) — здесь, до RateLimit: ключ лимита зависит от
+//     того, кто клиент (ADR-0016).
+//  7. RateLimit — до BodyLimit и Timeout: 429 без чтения тела и без
+//     goroutine хендлера; по пользователю или по IP анонима.
+//  8. BodyLimit — до Timeout: 413 по Content-Length без goroutine хендлера.
+//  9. Timeout — ближе всех к хендлеру: бюджет тратится только на хендлер;
 //     буферизация даёт чистый 500 даже после частичной записи.
-//  9. routeProblems — 404/405 роутера в формате RFC 9457.
+//  10. routeProblems — 404/405 роутера в формате RFC 9457.
 func newRouter(mux *http.ServeMux, log *slog.Logger, o routerOptions) (http.Handler, error) {
 	crossOrigin, err := middleware.CrossOrigin(o.corsOrigins)
 	if err != nil {
@@ -79,6 +82,7 @@ func newRouter(mux *http.ServeMux, log *slog.Logger, o routerOptions) (http.Hand
 		middleware.Recover(log),
 		middleware.CORS(o.corsOrigins),
 		crossOrigin,
+		middleware.RateLimit(o.rateLimit, log),
 		middleware.BodyLimit(maxBodyBytes),
 		middleware.Timeout(o.handlerTimeout, log),
 	), nil

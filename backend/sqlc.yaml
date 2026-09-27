@@ -37,3 +37,16 @@ sql:
               pointer: true
           - db_type: timestamptz
             go_type: time.Time
+
+  # Счётчики точных лимитов (ADR-0016).
+  - engine: postgresql
+    schema: migrations
+    queries: internal/platform/ratelimit/queries
+    gen:
+      go:
+        package: ratelimitdb
+        out: internal/platform/ratelimit/ratelimitdb
+        sql_package: pgx/v5
+        overrides:
+          - db_type: timestamptz
+            go_type: time.Time

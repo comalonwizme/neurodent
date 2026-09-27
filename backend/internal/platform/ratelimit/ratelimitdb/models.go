@@ -2,18 +2,19 @@
 // versions:
 //   sqlc v1.31.1
 
-package probedb
+package ratelimitdb
 
 import (
-	"github.com/comalonwizme/neurodent/backend/internal/shared/id"
+	"time"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // class=audit; Audit events (ADR-0014): ids and codes only, no PHI, no free text.
 type AuditEvent struct {
-	ID           id.ID
-	OccurredAt   pgtype.Timestamptz
-	RecordedAt   pgtype.Timestamptz
+	ID           pgtype.UUID
+	OccurredAt   time.Time
+	RecordedAt   time.Time
 	TenantID     pgtype.UUID
 	ActorKind    string
 	ActorID      pgtype.UUID
@@ -27,44 +28,44 @@ type AuditEvent struct {
 // class=cell-global; Rate limit counters (ADR-0016): HMAC keys only, no personal data.
 type PlatformRateLimitCounter struct {
 	Key         []byte
-	WindowStart pgtype.Timestamptz
+	WindowStart time.Time
 	Hits        int32
-	ExpiresAt   pgtype.Timestamptz
+	ExpiresAt   time.Time
 }
 
 // class=tenant; TECHNICAL: RLS probe of the tenant class for platform integration tests. Not business data.
 type PlatformRlsProbe struct {
-	ID       id.ID
-	TenantID id.ID
+	ID       pgtype.UUID
+	TenantID pgtype.UUID
 	Note     string
 }
 
 // class=patient-registry; TECHNICAL: RLS probe of guardianship links. Not business data.
 type PlatformRlsProbeGuardian struct {
-	TenantID       id.ID
-	GuardianUserID id.ID
-	WardPatientID  id.ID
+	TenantID       pgtype.UUID
+	GuardianUserID pgtype.UUID
+	WardPatientID  pgtype.UUID
 }
 
 // class=patient-registry; TECHNICAL: RLS probe of patient cards. Not business data.
 type PlatformRlsProbePatient struct {
-	ID       id.ID
-	TenantID id.ID
+	ID       pgtype.UUID
+	TenantID pgtype.UUID
 	UserID   pgtype.UUID
 	Note     string
 }
 
 // class=tenant-public; TECHNICAL: RLS probe of the tenant-public class. Not business data.
 type PlatformRlsProbePublic struct {
-	ID       id.ID
-	TenantID id.ID
+	ID       pgtype.UUID
+	TenantID pgtype.UUID
 	Note     string
 }
 
 // class=patient-owned; TECHNICAL: RLS probe of the patient-owned class. Not business data.
 type PlatformRlsProbeRecord struct {
-	ID        id.ID
-	TenantID  id.ID
-	PatientID id.ID
+	ID        pgtype.UUID
+	TenantID  pgtype.UUID
+	PatientID pgtype.UUID
 	Note      string
 }

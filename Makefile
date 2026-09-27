@@ -33,6 +33,11 @@ db-env:
 	    echo "NEURODENT_PG_APP_PASSWORD=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; \
 	  } > .env && echo "created .env with local database passwords"; \
 	fi
+	@# Секрет HMAC ключей rate limit (ADR-0016): 32 байта. Дописывается и в
+	@# .env, созданный до его появления.
+	@grep -q '^NEURODENT_RATELIMIT_KEY=' .env || { \
+	  echo "NEURODENT_RATELIMIT_KEY=$$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" >> .env && \
+	  echo "added NEURODENT_RATELIMIT_KEY to .env"; }
 
 db-up: db-env
 	docker compose up -d --wait postgres
@@ -51,6 +56,7 @@ migrate:
 
 run:
 	@NEURODENT_ENV=dev NEURODENT_DB_DSN='$(call pg_dsn,neurodent_app,$(NEURODENT_PG_APP_PASSWORD))' \
+	  NEURODENT_RATELIMIT_KEY='$(NEURODENT_RATELIMIT_KEY)' \
 	  go -C backend run ./cmd/api
 
 test-integration:
