@@ -3,12 +3,14 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
 	"github.com/comalonwizme/neurodent/backend/migrations"
@@ -98,10 +100,36 @@ func testMigrations(t *testing.T, env *pgEnv) {
 		}
 	})
 
+	t.Run("stuck migrator does not block forever", func(t *testing.T) { testMigrationLockWait(t, env) })
+
 	t.Run("database ahead of binary is rejected", func(t *testing.T) {
 		err := postgres.Migrate(t.Context(), ownerConn(t, env), fstest.MapFS{}, env.log)
 		if err == nil || !strings.Contains(err.Error(), "unknown to this binary") {
 			t.Errorf("Migrate() = %v, want database-ahead error", err)
 		}
 	})
+}
+
+func testMigrationLockWait(t *testing.T, env *pgEnv) {
+	ctx := t.Context()
+	holder := ownerConn(t, env)
+	if _, err := holder.Exec(ctx, "SELECT pg_advisory_lock($1)", postgres.MigrationLockKey); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = holder.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", postgres.MigrationLockKey)
+	}()
+
+	// Страховка: без таймаута ожидания мигратор висел бы вечно — тест должен
+	// упасть, а не зависнуть.
+	guarded, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	err := postgres.Migrate(guarded, ownerConn(t, env), migrations.FS(), env.log, postgres.WithLockWait(200*time.Millisecond))
+	if pgCode(err) != "55P03" { // lock_not_available
+		t.Errorf("Migrate while another migrator holds the lock = %v, want SQLSTATE 55P03", err)
+	}
+	if waited := time.Since(started); waited > 5*time.Second {
+		t.Errorf("migrator waited %s, want about the configured 200ms", waited)
+	}
 }
