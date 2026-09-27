@@ -1,10 +1,12 @@
 package app
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/comalonwizme/neurodent/backend/internal/gen/platformapi"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/transport/http/middleware"
@@ -21,43 +23,69 @@ const maxBodyBytes = 1 << 20
 type routerOptions struct {
 	handlerTimeout time.Duration
 	hsts           bool
+	corsOrigins    []string
+	rateLimit      middleware.RateLimitOptions
 }
 
-// registerRoutes — единственное место, где видны все маршруты. Шаблон с
-// методом даёт 405 + Allow на чужой метод; GET обслуживает и HEAD.
-func registerRoutes(mux *http.ServeMux, probe *health.Probe) {
-	mux.HandleFunc("GET /healthz", probe.Liveness)
-	mux.HandleFunc("GET /readyz", probe.Readiness)
+// registerRoutes — единственное место, где маршруты попадают на mux.
+// Маршруты генерируются из api/openapi/openapi.yaml (ADR-0013): каждый
+// сгенерированный пакет регистрирует свои операции шаблонами с методом
+// (405 + Allow на чужой метод; GET обслуживает и HEAD). Модули добавят
+// сюда свои HandlerWithOptions.
+func registerRoutes(mux *http.ServeMux, log *slog.Logger, probe *health.Probe) {
+	platformapi.HandlerWithOptions(platformAPI{probe: probe}, platformapi.StdHTTPServerOptions{
+		BaseRouter:       mux,
+		ErrorHandlerFunc: httpx.ParamErrorHandler(log),
+	})
 }
 
-// newRouter оборачивает mux цепочкой middleware.
+// platformAPI реализует сгенерированный интерфейс платформенных эндпоинтов.
+type platformAPI struct{ probe *health.Probe }
+
+func (a platformAPI) GetHealthz(w http.ResponseWriter, r *http.Request) { a.probe.Liveness(w, r) }
+func (a platformAPI) GetReadyz(w http.ResponseWriter, r *http.Request)  { a.probe.Readiness(w, r) }
+
+// newRouter оборачивает mux цепочкой middleware (ADR-0015, заменяет 0009).
 //
 // Порядок (снаружи внутрь) и почему именно такой:
 //
 //  1. RequestID — первым: id нужен всем ниже, в том числе логам паник,
 //     access-логу и телам ошибок.
-//  2. AccessLog — снаружи Recover и Timeout: видит итоговый статус (500
-//     после паники, 503 после таймаута) и полную длительность.
-//  3. SecurityHeaders — снаружи Recover, BodyLimit и Timeout: заголовки
-//     стоят на любом ответе, включая 500, 413 и 503, которые пишут они.
-//  4. Recover — снаружи Timeout: Timeout переносит панику из goroutine
-//     хендлера в goroutine запроса, и ловит её Recover. Всё, что снаружи
-//     Recover, не должно паниковать — это простые обёртки без логики.
-//  5. BodyLimit — до Timeout: 413 по Content-Length отдаётся без запуска
-//     goroutine хендлера.
-//  6. Timeout — ближе всех к хендлеру: бюджет тратится только на работу
-//     хендлера. Буферизация в Timeout заодно гарантирует, что паника после
-//     частичной записи всё равно даст чистый 500.
-//  7. routeProblems — 404/405 роутера в формате RFC 9457.
-func newRouter(mux *http.ServeMux, log *slog.Logger, o routerOptions) http.Handler {
+//  2. AccessLog — снаружи всех, кто пишет ответ сам: видит итоговый статус
+//     (403, 413, 429, 500, 503) и полную длительность.
+//  3. SecurityHeaders — заголовки ставятся до любого ответа.
+//  4. Recover — снаружи всех слоёв с логикой (CORS, CrossOrigin, RateLimit,
+//     Timeout); снаружи него — только простые обёртки. Timeout переносит
+//     панику из goroutine хендлера в goroutine запроса, ловит её Recover.
+//  5. CORS — до всех, кто пишет ответ: заголовки ставятся в общую карту
+//     раньше, чем кто-то ответит (даже 500 от Recover). Preflight отвечает
+//     сам, не доходя до хендлера.
+//  6. CrossOrigin (CSRF) — preflight уже отвечен; отвергнутая подделка не
+//     доходит до лимитов и хендлера.
+//     Место [Auth] (IAM) — здесь, до RateLimit: ключ лимита зависит от
+//     того, кто клиент (ADR-0016).
+//  7. RateLimit — до BodyLimit и Timeout: 429 без чтения тела и без
+//     goroutine хендлера; по пользователю или по IP анонима.
+//  8. BodyLimit — до Timeout: 413 по Content-Length без goroutine хендлера.
+//  9. Timeout — ближе всех к хендлеру: бюджет тратится только на хендлер;
+//     буферизация даёт чистый 500 даже после частичной записи.
+//  10. routeProblems — 404/405 роутера в формате RFC 9457.
+func newRouter(mux *http.ServeMux, log *slog.Logger, o routerOptions) (http.Handler, error) {
+	crossOrigin, err := middleware.CrossOrigin(o.corsOrigins)
+	if err != nil {
+		return nil, fmt.Errorf("cross-origin protection: %w", err)
+	}
 	return middleware.Chain(routeProblems(mux),
 		middleware.RequestID,
 		middleware.AccessLog(log, mux),
 		middleware.SecurityHeaders(o.hsts),
 		middleware.Recover(log),
+		middleware.CORS(o.corsOrigins),
+		crossOrigin,
+		middleware.RateLimit(o.rateLimit, log),
 		middleware.BodyLimit(maxBodyBytes),
 		middleware.Timeout(o.handlerTimeout, log),
-	)
+	), nil
 }
 
 // Коды problem-ответов роутера. Категорий apperr для них нет: это ошибки

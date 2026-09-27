@@ -26,10 +26,16 @@ func lookupFrom(m map[string]string) func(string) (string, bool) {
 // и форматированный вывод.
 const testDSN = "postgres://app:s3cr3t-pw@db.internal:5432/neurodent"
 
+// testRLKey — секрет HMAC лимитов (32 байта); тоже не должен утекать.
+const testRLKey = "rl-key-0123456789abcdef0123456789"
+
+// testOrigins — origin браузерного клиента для окружений вне dev.
+const testOrigins = "https://app.neurodent.example"
+
 // withEnv — окружение staging плюс переопределения. Staging выбран базой,
 // потому что у него ненулевой DrainDelay и все инварианты работают.
 func withEnv(kv ...string) map[string]string {
-	m := map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"}
+	m := map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "staging", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins}
 	for i := 0; i < len(kv); i += 2 {
 		m[kv[i]] = kv[i+1]
 	}
@@ -46,7 +52,7 @@ func TestLoad_Valid(t *testing.T) {
 	}{
 		{
 			name: "dev on defaults has no drain delay",
-			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "dev"},
 			want: Config{
 				Env:               "dev",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -59,16 +65,19 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         10,
-				DBConnectTimeout:   5 * time.Second,
-				DBStatementTimeout: 5 * time.Second,
-				DBMaxConnLifetime:  30 * time.Minute,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          10,
+				DBConnectTimeout:    5 * time.Second,
+				DBStatementTimeout:  5 * time.Second,
+				DBMaxConnLifetime:   30 * time.Minute,
 			},
 		},
 		{
 			name: "staging on defaults drains for 2s",
-			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "staging"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "staging", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins},
 			want: Config{
 				Env:               "staging",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -81,16 +90,20 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        2 * time.Second,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         10,
-				DBConnectTimeout:   5 * time.Second,
-				DBStatementTimeout: 5 * time.Second,
-				DBMaxConnLifetime:  30 * time.Minute,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          10,
+				DBConnectTimeout:    5 * time.Second,
+				DBStatementTimeout:  5 * time.Second,
+				CORSAllowedOrigins:  Origins{joined: testOrigins},
+				DBMaxConnLifetime:   30 * time.Minute,
 			},
 		},
 		{
 			name: "prod with info level",
-			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "info"},
+			env:  map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "prod", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins, "NEURODENT_LOG_LEVEL": "info"},
 			want: Config{
 				Env:               "prod",
 				HTTPAddr:          "127.0.0.1:8080",
@@ -103,17 +116,22 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        2 * time.Second,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         10,
-				DBConnectTimeout:   5 * time.Second,
-				DBStatementTimeout: 5 * time.Second,
-				DBMaxConnLifetime:  30 * time.Minute,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          10,
+				DBConnectTimeout:    5 * time.Second,
+				DBStatementTimeout:  5 * time.Second,
+				CORSAllowedOrigins:  Origins{joined: testOrigins},
+				DBMaxConnLifetime:   30 * time.Minute,
 			},
 		},
 		{
 			name: "dev with every variable customized",
 			env: map[string]string{
 				"NEURODENT_DB_DSN":               testDSN,
+				"NEURODENT_RATELIMIT_KEY":        testRLKey,
 				"NEURODENT_ENV":                  "dev",
 				"NEURODENT_HTTP_ADDR":            "0.0.0.0:9090",
 				"NEURODENT_READ_HEADER_TIMEOUT":  "2s",
@@ -141,11 +159,14 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        3 * time.Second,
 				LogLevel:          slog.LevelDebug,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         25,
-				DBConnectTimeout:   3 * time.Second,
-				DBStatementTimeout: 2500 * time.Millisecond,
-				DBMaxConnLifetime:  time.Hour,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          25,
+				DBConnectTimeout:    3 * time.Second,
+				DBStatementTimeout:  2500 * time.Millisecond,
+				DBMaxConnLifetime:   time.Hour,
 			},
 		},
 		{
@@ -178,11 +199,15 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         1,
-				DBConnectTimeout:   time.Second,
-				DBStatementTimeout: 100 * time.Millisecond,
-				DBMaxConnLifetime:  time.Minute,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          1,
+				DBConnectTimeout:    time.Second,
+				DBStatementTimeout:  100 * time.Millisecond,
+				CORSAllowedOrigins:  Origins{joined: testOrigins},
+				DBMaxConnLifetime:   time.Minute,
 			},
 		},
 		{
@@ -211,11 +236,15 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        10 * time.Second,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         100,
-				DBConnectTimeout:   30 * time.Second,
-				DBStatementTimeout: 5 * time.Second,
-				DBMaxConnLifetime:  24 * time.Hour,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          100,
+				DBConnectTimeout:    30 * time.Second,
+				DBStatementTimeout:  5 * time.Second,
+				CORSAllowedOrigins:  Origins{joined: testOrigins},
+				DBMaxConnLifetime:   24 * time.Hour,
 			},
 		},
 		{
@@ -237,11 +266,15 @@ func TestLoad_Valid(t *testing.T) {
 				DrainDelay:        0,
 				LogLevel:          slog.LevelInfo,
 
-				DBDSN:              Secret{v: testDSN},
-				DBMaxConns:         10,
-				DBConnectTimeout:   5 * time.Second,
-				DBStatementTimeout: 5 * time.Second,
-				DBMaxConnLifetime:  30 * time.Minute,
+				DBDSN:               Secret{v: testDSN},
+				RateLimitKey:        Secret{v: testRLKey},
+				RateLimitAnonPerMin: 300,
+				RateLimitUserPerMin: 600,
+				DBMaxConns:          10,
+				DBConnectTimeout:    5 * time.Second,
+				DBStatementTimeout:  5 * time.Second,
+				CORSAllowedOrigins:  Origins{joined: testOrigins},
+				DBMaxConnLifetime:   30 * time.Minute,
 			},
 		},
 	}
@@ -269,19 +302,19 @@ func TestLoad_Errors(t *testing.T) {
 		// ENV
 		{
 			name:     "missing env",
-			env:      map[string]string{"NEURODENT_DB_DSN": testDSN},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 		{
 			name:     "unknown env",
-			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "production"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "production"},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 
 		// set-but-empty (N1): пустая строка — ошибка, а не дефолт.
 		{
 			name:      "empty env",
-			env:       map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": ""},
+			env:       map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": ""},
 			wantKeys:  []string{"NEURODENT_ENV"},
 			wantEmpty: true,
 		},
@@ -308,8 +341,8 @@ func TestLoad_Errors(t *testing.T) {
 		{
 			name: "single typo gives single error",
 			env: map[string]string{
-				"NEURODENT_DB_DSN": testDSN,
-				"NEURODENT_ENV":    "dev", "NEURODENT_READ_TIMEOUT": "5x",
+				"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey,
+				"NEURODENT_ENV": "dev", "NEURODENT_READ_TIMEOUT": "5x",
 			},
 			wantKeys: []string{"NEURODENT_READ_TIMEOUT"},
 		},
@@ -330,7 +363,7 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "broken env does not trigger prod level check",
-			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prd", "NEURODENT_LOG_LEVEL": "debug"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "prd", "NEURODENT_LOG_LEVEL": "debug"},
 			wantKeys: []string{"NEURODENT_ENV"},
 		},
 		{
@@ -464,14 +497,14 @@ func TestLoad_Errors(t *testing.T) {
 		},
 		{
 			name:     "prod with debug",
-			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "prod", "NEURODENT_LOG_LEVEL": "debug"},
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "prod", "NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins, "NEURODENT_LOG_LEVEL": "debug"},
 			wantKeys: []string{"NEURODENT_LOG_LEVEL"},
 		},
 
 		// База данных.
 		{
 			name:     "missing dsn",
-			env:      map[string]string{"NEURODENT_ENV": "dev"},
+			env:      map[string]string{"NEURODENT_ENV": "dev", "NEURODENT_RATELIMIT_KEY": testRLKey},
 			wantKeys: []string{"NEURODENT_DB_DSN"},
 		},
 		{
@@ -481,9 +514,9 @@ func TestLoad_Errors(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name:     "missing env and dsn give two errors",
+			name:     "missing env, dsn and ratelimit key give three errors",
 			env:      map[string]string{},
-			wantKeys: []string{"NEURODENT_DB_DSN", "NEURODENT_ENV"},
+			wantKeys: []string{"NEURODENT_DB_DSN", "NEURODENT_ENV", "NEURODENT_RATELIMIT_KEY"},
 		},
 		{
 			name:     "max conns zero",
@@ -541,6 +574,47 @@ func TestLoad_Errors(t *testing.T) {
 			env:      withEnv("NEURODENT_HANDLER_TIMEOUT", "abc", "NEURODENT_DB_STATEMENT_TIMEOUT", "9s"),
 			wantKeys: []string{"NEURODENT_HANDLER_TIMEOUT"},
 		},
+
+		// CORS (ADR-0015).
+		{
+			name:     "origins missing in staging",
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "staging"},
+			wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+		},
+		{
+			name:     "origins missing in prod",
+			env:      map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "prod"},
+			wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+		},
+		{
+			name:      "origins set but empty",
+			env:       withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", ""),
+			wantKeys:  []string{"NEURODENT_CORS_ALLOWED_ORIGINS"},
+			wantEmpty: true,
+		},
+		{name: "origin wildcard", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "*"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin null", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "null"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with path", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example/login"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with trailing slash", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example/"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin with query", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example?x=1"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin uppercase", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://App.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin default port", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://app.example:443"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin without scheme", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "origin ftp", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "ftp://app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "empty element", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://a.example,,https://b.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "duplicate origin", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "https://a.example, https://a.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+		{name: "http origin outside dev", env: withEnv("NEURODENT_CORS_ALLOWED_ORIGINS", "http://app.example"), wantKeys: []string{"NEURODENT_CORS_ALLOWED_ORIGINS"}},
+
+		// Rate limit и доверенные прокси (ADR-0016).
+		{name: "ratelimit key missing", env: map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"}, wantKeys: []string{"NEURODENT_RATELIMIT_KEY"}},
+		{name: "ratelimit key too short", env: withEnv("NEURODENT_RATELIMIT_KEY", "short"), wantKeys: []string{"NEURODENT_RATELIMIT_KEY"}},
+		{name: "ratelimit key empty", env: withEnv("NEURODENT_RATELIMIT_KEY", ""), wantKeys: []string{"NEURODENT_RATELIMIT_KEY"}, wantEmpty: true},
+		{name: "anon limit zero", env: withEnv("NEURODENT_RATELIMIT_ANON_PER_MINUTE", "0"), wantKeys: []string{"NEURODENT_RATELIMIT_ANON_PER_MINUTE"}},
+		{name: "user limit above max", env: withEnv("NEURODENT_RATELIMIT_USER_PER_MINUTE", "100001"), wantKeys: []string{"NEURODENT_RATELIMIT_USER_PER_MINUTE"}},
+		{name: "proxy without mask", env: withEnv("NEURODENT_TRUSTED_PROXIES", "10.0.0.1"), wantKeys: []string{"NEURODENT_TRUSTED_PROXIES"}},
+		{name: "proxy with host bits", env: withEnv("NEURODENT_TRUSTED_PROXIES", "10.0.0.1/8"), wantKeys: []string{"NEURODENT_TRUSTED_PROXIES"}},
+		{name: "proxy garbage", env: withEnv("NEURODENT_TRUSTED_PROXIES", "10.0.0.0/8,lb"), wantKeys: []string{"NEURODENT_TRUSTED_PROXIES"}},
+		{name: "proxies empty", env: withEnv("NEURODENT_TRUSTED_PROXIES", ""), wantKeys: []string{"NEURODENT_TRUSTED_PROXIES"}, wantEmpty: true},
 
 		// Адрес (N2).
 		{
@@ -610,7 +684,7 @@ func errorKeys(t *testing.T, err error) []string {
 }
 
 func TestConfig_LogValue(t *testing.T) {
-	cfg, err := load(lookupFrom(map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_ENV": "dev"}))
+	cfg, err := load(lookupFrom(map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "dev"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,6 +702,7 @@ func TestConfig_LogValue(t *testing.T) {
 	// Ровно этот набор. Новое поле в логе — осознанное решение, которое
 	// должно пройти через этот список.
 	want := []string{
+		"cors_allowed_origins",
 		"db_connect_timeout",
 		"db_max_conn_lifetime",
 		"db_max_conns",
@@ -638,9 +713,12 @@ func TestConfig_LogValue(t *testing.T) {
 		"http_addr",
 		"idle_timeout",
 		"log_level",
+		"ratelimit_anon_per_minute",
+		"ratelimit_user_per_minute",
 		"read_header_timeout",
 		"read_timeout",
 		"shutdown_timeout",
+		"trusted_proxies",
 		"write_timeout",
 	}
 	got := slices.Sorted(maps.Keys(rec.Config))
@@ -662,14 +740,16 @@ func FuzzLoad(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, env, rht, rt, wt, ht, st, dd string) {
 		cfg, err := load(lookupFrom(map[string]string{
-			"NEURODENT_DB_DSN":              testDSN,
-			"NEURODENT_ENV":                 env,
-			"NEURODENT_READ_HEADER_TIMEOUT": rht,
-			"NEURODENT_READ_TIMEOUT":        rt,
-			"NEURODENT_WRITE_TIMEOUT":       wt,
-			"NEURODENT_HANDLER_TIMEOUT":     ht,
-			"NEURODENT_SHUTDOWN_TIMEOUT":    st,
-			"NEURODENT_DRAIN_DELAY":         dd,
+			"NEURODENT_DB_DSN":               testDSN,
+			"NEURODENT_RATELIMIT_KEY":        testRLKey,
+			"NEURODENT_ENV":                  env,
+			"NEURODENT_READ_HEADER_TIMEOUT":  rht,
+			"NEURODENT_READ_TIMEOUT":         rt,
+			"NEURODENT_WRITE_TIMEOUT":        wt,
+			"NEURODENT_HANDLER_TIMEOUT":      ht,
+			"NEURODENT_SHUTDOWN_TIMEOUT":     st,
+			"NEURODENT_DRAIN_DELAY":          dd,
+			"NEURODENT_CORS_ALLOWED_ORIGINS": testOrigins,
 		}))
 		if err != nil {
 			return
@@ -736,7 +816,7 @@ func TestSecret_NeverPrinted(t *testing.T) {
 	outputs = append(outputs, buf.String())
 
 	for _, out := range outputs {
-		for _, leak := range []string{"s3cr3t-pw", "db.internal", testDSN} {
+		for _, leak := range []string{"s3cr3t-pw", "db.internal", testDSN, testRLKey} {
 			if strings.Contains(out, leak) {
 				t.Errorf("secret part %q leaked in output: %s", leak, out)
 			}
@@ -774,5 +854,52 @@ func TestLoadMigrate(t *testing.T) {
 	}
 	if got.Env != "prod" || got.DSN.Reveal() != testDSN {
 		t.Errorf("loadMigrate() = %v, %q", got.Env, got.DSN.Reveal())
+	}
+}
+
+func TestLoad_DevAllowsHTTPOriginsAndEmptyList(t *testing.T) {
+	cfg, err := load(lookupFrom(map[string]string{
+		"NEURODENT_DB_DSN":               testDSN,
+		"NEURODENT_RATELIMIT_KEY":        testRLKey,
+		"NEURODENT_ENV":                  "dev",
+		"NEURODENT_CORS_ALLOWED_ORIGINS": "http://localhost:4200, https://app.neurodent.example",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.CORSAllowedOrigins.List(); !slices.Equal(got, []string{"http://localhost:4200", "https://app.neurodent.example"}) {
+		t.Errorf("origins = %v", got)
+	}
+	cfg, err = load(lookupFrom(map[string]string{"NEURODENT_DB_DSN": testDSN, "NEURODENT_RATELIMIT_KEY": testRLKey, "NEURODENT_ENV": "dev"}))
+	if err != nil || cfg.CORSAllowedOrigins.List() != nil {
+		t.Errorf("dev without origins: %v, %v", cfg.CORSAllowedOrigins.List(), err)
+	}
+}
+
+func TestLoad_TrustedProxiesAndLimits(t *testing.T) {
+	cfg, err := load(lookupFrom(withEnv(
+		"NEURODENT_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.10/32,fd00::/8",
+		"NEURODENT_RATELIMIT_ANON_PER_MINUTE", "60",
+		"NEURODENT_RATELIMIT_USER_PER_MINUTE", "1200",
+	)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range cfg.TrustedProxies.List() {
+		got = append(got, p.String())
+	}
+	if !slices.Equal(got, []string{"10.0.0.0/8", "192.168.1.10/32", "fd00::/8"}) {
+		t.Errorf("proxies = %v", got)
+	}
+	if cfg.RateLimitAnonPerMin != 60 || cfg.RateLimitUserPerMin != 1200 {
+		t.Errorf("limits = %d/%d", cfg.RateLimitAnonPerMin, cfg.RateLimitUserPerMin)
+	}
+	if cfg.TrustedProxies.List() == nil && len(got) != 0 {
+		t.Error("unreachable")
+	}
+	cfg, err = load(lookupFrom(withEnv()))
+	if err != nil || cfg.TrustedProxies.List() != nil {
+		t.Errorf("default proxies = %v, %v; want none (XFF never trusted)", cfg.TrustedProxies.List(), err)
 	}
 }

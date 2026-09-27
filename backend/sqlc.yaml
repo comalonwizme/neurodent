@@ -1,0 +1,52 @@
+# sqlc (ADR-0013): схема — наши миграции, запросы — рядом с пакетом, который
+# ими пользуется. Запуск — make generate (из каталога backend).
+version: "2"
+sql:
+  # Технические probe-таблицы integration-тестов: заодно проверяют, что
+  # сгенерированный код работает на DBTX из postgres.Tx(ctx).
+  - engine: postgresql
+    schema: migrations
+    queries: tests/integration/queries
+    gen:
+      go:
+        package: probedb
+        out: tests/integration/probedb
+        sql_package: pgx/v5
+        overrides:
+          - db_type: uuid
+            go_type: github.com/comalonwizme/neurodent/backend/internal/shared/id.ID
+
+  # Журнал аудита (ADR-0014).
+  - engine: postgresql
+    schema: migrations
+    queries: internal/platform/audit/queries
+    gen:
+      go:
+        package: auditdb
+        out: internal/platform/audit/auditdb
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/comalonwizme/neurodent/backend/internal/shared/id.ID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/comalonwizme/neurodent/backend/internal/shared/id
+              type: ID
+              pointer: true
+          - db_type: timestamptz
+            go_type: time.Time
+
+  # Счётчики точных лимитов (ADR-0016).
+  - engine: postgresql
+    schema: migrations
+    queries: internal/platform/ratelimit/queries
+    gen:
+      go:
+        package: ratelimitdb
+        out: internal/platform/ratelimit/ratelimitdb
+        sql_package: pgx/v5
+        overrides:
+          - db_type: timestamptz
+            go_type: time.Time

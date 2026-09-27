@@ -12,15 +12,31 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// migrateLockKey — ключ pg_advisory_lock. Два мигратора (два пода при
+// MigrationLockKey — ключ pg_advisory_lock. Два мигратора (два пода при
 // раскатке, CI и человек) не должны применять миграции одновременно.
 // Значение — байты "neuroden" как int64: фиксированное и узнаваемое
 // в pg_locks.
-const migrateLockKey int64 = 0x6e6575726f64656e
+const MigrationLockKey int64 = 0x6e6575726f64656e
+
+// defaultLockWait — сколько мигратор ждёт advisory lock. Легитимный
+// параллельный мигратор заканчивает за секунды; дольше — он завис, и deploy
+// job должен упасть с понятной ошибкой, а не висеть до таймаута CI.
+const defaultLockWait = time.Minute
+
+// MigrateOption настраивает Migrate.
+type MigrateOption func(*migrateOptions)
+
+type migrateOptions struct{ lockWait time.Duration }
+
+// WithLockWait задаёт, сколько ждать advisory lock другого мигратора.
+func WithLockWait(d time.Duration) MigrateOption {
+	return func(o *migrateOptions) { o.lockWait = d }
+}
 
 // migrationLockTimeout — lock_timeout внутри миграции. ALTER TABLE ждёт
 // ACCESS EXCLUSIVE, и пока он ждёт, за ним в очередь встают все запросы
@@ -52,19 +68,32 @@ type appliedMigration struct {
 // (sha256 содержимого) и что БД не новее бинарника.
 //
 // conn должен принадлежать владельцу схемы: прикладная роль DDL не выполняет.
-func Migrate(ctx context.Context, conn *pgx.Conn, fsys fs.FS, log *slog.Logger) error {
+func Migrate(ctx context.Context, conn *pgx.Conn, fsys fs.FS, log *slog.Logger, opts ...MigrateOption) error {
+	o := migrateOptions{lockWait: defaultLockWait}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	migs, err := loadMigrations(fsys)
 	if err != nil {
 		return err
 	}
 
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLockKey); err != nil {
-		return fmt.Errorf("acquire migration lock: %w", err)
+	// lock_timeout действует и на advisory lock: ждём не дольше lockWait,
+	// затем 55P03 lock_not_available. После захвата сбрасываем — у миграций
+	// свой lock_timeout (SET LOCAL в транзакции миграции).
+	if _, err := conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = %d", o.lockWait.Milliseconds())); err != nil {
+		return fmt.Errorf("set lock wait: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", MigrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration lock (another migrator holds it longer than %s): %w", o.lockWait, err)
+	}
+	if _, err := conn.Exec(ctx, "RESET lock_timeout"); err != nil {
+		return fmt.Errorf("reset lock wait: %w", err)
 	}
 	defer func() {
 		// Сессионный lock снимется и при закрытии соединения; явное снятие —
 		// чтобы следующий мигратор не ждал, пока мы закроемся.
-		if _, err := conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", migrateLockKey); err != nil {
+		if _, err := conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", MigrationLockKey); err != nil {
 			log.WarnContext(ctx, "release migration lock failed", "err", err)
 		}
 	}()

@@ -8,8 +8,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,6 +50,13 @@ const (
 	keyDBMaxConnLifetime  = "NEURODENT_DB_MAX_CONN_LIFETIME"
 
 	keyMigrateDSN = "NEURODENT_MIGRATE_DSN"
+
+	keyCORSAllowedOrigins = "NEURODENT_CORS_ALLOWED_ORIGINS"
+
+	keyTrustedProxies      = "NEURODENT_TRUSTED_PROXIES"
+	keyRateLimitKey        = "NEURODENT_RATELIMIT_KEY"
+	keyRateLimitAnonPerMin = "NEURODENT_RATELIMIT_ANON_PER_MINUTE"
+	keyRateLimitUserPerMin = "NEURODENT_RATELIMIT_USER_PER_MINUTE"
 )
 
 // Бюджет остановки процесса.
@@ -126,6 +137,20 @@ const (
 	// ротации паролей и чтобы backend-процессы не копили память. 30m — ротация
 	// заметна за время одного деплоя и не создаёт шторма переподключений.
 	defaultDBMaxConnLifetime = 30 * time.Minute
+
+	// Грубый лимит анонимных запросов по IP (ADR-0016). Щедрый из-за CGNAT
+	// мобильных операторов и NAT клиник: за одним адресом — сотни людей.
+	// Перебор паролей и кодов останавливают точные лимиты по аккаунту в IAM;
+	// этот лишь отсекает флуд с одного адреса.
+	defaultRateLimitAnonPerMin = 300
+
+	// Лимит аутентифицированного пользователя: экран SPA делает пачку
+	// запросов, 10 в секунду в среднем — с запасом для честной работы.
+	// Больше — скрипт или зациклившийся клиент.
+	defaultRateLimitUserPerMin = 600
+
+	// Минимальная длина секрета HMAC для ключей лимитов: 256 бит.
+	minRateLimitKeyLen = 32
 )
 
 // bounds — допустимый диапазон для duration-переменной. Верхняя граница ловит
@@ -187,6 +212,48 @@ type Config struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 	DBMaxConnLifetime  time.Duration
+
+	// Origin браузерного клиента (ADR-0015): CORS с credentials и доверенные
+	// origin для защиты от CSRF. Пусто — только в dev (Angular dev-server
+	// проксирует API, запросы same-origin).
+	CORSAllowedOrigins Origins
+
+	// Прокси, чьему X-Forwarded-For можно верить (ADR-0016). Пусто — XFF не
+	// учитывается никогда.
+	TrustedProxies Prefixes
+	// Секрет HMAC для ключей лимитов: в таблице счётчиков нет ни IP, ни
+	// телефонов — только HMAC от них.
+	RateLimitKey        Secret
+	RateLimitAnonPerMin int32
+	RateLimitUserPerMin int32
+}
+
+// Prefixes — список CIDR. Хранится строкой, чтобы Config оставался
+// сравнимым.
+type Prefixes struct{ joined string }
+
+// List возвращает разобранные префиксы (формат проверен при загрузке).
+func (p Prefixes) List() []netip.Prefix {
+	if p.joined == "" {
+		return nil
+	}
+	var out []netip.Prefix
+	for s := range strings.SplitSeq(p.joined, ",") {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}
+
+// Origins — список origin вида scheme://host[:port]. Хранится строкой,
+// чтобы Config оставался сравнимым (тесты сравнивают его целиком).
+type Origins struct{ joined string }
+
+// List возвращает origin по одному.
+func (o Origins) List() []string {
+	if o.joined == "" {
+		return nil
+	}
+	return strings.Split(o.joined, ",")
 }
 
 // LogValue реализует slog.LogValuer по принципу allowlist: в лог попадают
@@ -208,6 +275,10 @@ func (c Config) LogValue() slog.Value {
 		slog.Duration("db_connect_timeout", c.DBConnectTimeout),
 		slog.Duration("db_statement_timeout", c.DBStatementTimeout),
 		slog.Duration("db_max_conn_lifetime", c.DBMaxConnLifetime),
+		slog.String("cors_allowed_origins", c.CORSAllowedOrigins.joined),
+		slog.String("trusted_proxies", c.TrustedProxies.joined),
+		slog.Int("ratelimit_anon_per_minute", int(c.RateLimitAnonPerMin)),
+		slog.Int("ratelimit_user_per_minute", int(c.RateLimitUserPerMin)),
 	)
 }
 
@@ -240,10 +311,20 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	lvl, lvlOK := l.logLevel(keyLogLevel, defaultLogLevel)
 
 	dsn := l.secret(keyDBDSN)
-	maxConns, _ := l.intRange(keyDBMaxConns, defaultDBMaxConns, 1, 100)
+	maxConns := l.intRange(keyDBMaxConns, defaultDBMaxConns, 1, 100)
 	dbct, _ := l.duration(keyDBConnectTimeout, defaultDBConnectTimeout, bounds{time.Second, 30 * time.Second})
 	dbst, dbstOK := l.duration(keyDBStatementTimeout, defaultDBStatementTimeout, bounds{100 * time.Millisecond, time.Minute})
 	dblt, _ := l.duration(keyDBMaxConnLifetime, defaultDBMaxConnLifetime, bounds{time.Minute, 24 * time.Hour})
+
+	origins, originsOK := l.origins(keyCORSAllowedOrigins)
+
+	proxies, _ := l.prefixes(keyTrustedProxies)
+	rlKey := l.secret(keyRateLimitKey)
+	if v := rlKey.Reveal(); v != "" && len(v) < minRateLimitKeyLen {
+		l.fail(keyRateLimitKey, fmt.Errorf("must be at least %d bytes", minRateLimitKeyLen))
+	}
+	anonLimit := l.intRange(keyRateLimitAnonPerMin, defaultRateLimitAnonPerMin, 1, 100000)
+	userLimit := l.intRange(keyRateLimitUserPerMin, defaultRateLimitUserPerMin, 1, 100000)
 
 	// Этап 2: кросс-полевые инварианты — только если все участники валидны.
 	// Иначе одна опечатка порождает каскад ложных ошибок про соседние поля.
@@ -261,6 +342,16 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	if dbstOK && htOK && dbst >= ht {
 		l.fail(keyDBStatementTimeout, fmt.Errorf("must be < %s: a query that outlives the handler is wasted work holding a connection", keyHandlerTimeout))
+	}
+	if envOK && originsOK && env != EnvDev {
+		if origins.joined == "" {
+			l.fail(keyCORSAllowedOrigins, errors.New("required outside dev: the browser client needs CORS and CSRF trusted origins"))
+		}
+		for _, o := range origins.List() {
+			if strings.HasPrefix(o, "http://") {
+				l.fail(keyCORSAllowedOrigins, fmt.Errorf("origin %q: only https outside dev", o))
+			}
+		}
 	}
 	if envOK && lvlOK && env == EnvProd && lvl < slog.LevelInfo {
 		l.fail(keyLogLevel, errors.New("levels below info are forbidden in prod: debug logs end up containing PHI"))
@@ -287,6 +378,13 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		DBConnectTimeout:   dbct,
 		DBStatementTimeout: dbst,
 		DBMaxConnLifetime:  dblt,
+
+		CORSAllowedOrigins: origins,
+
+		TrustedProxies:      proxies,
+		RateLimitKey:        rlKey,
+		RateLimitAnonPerMin: anonLimit,
+		RateLimitUserPerMin: userLimit,
 	}, nil
 }
 
@@ -423,26 +521,109 @@ func (l *loader) secret(key string) Secret {
 	return Secret{v: s}
 }
 
-// intRange парсит целое и проверяет диапазон [lo, hi].
-func (l *loader) intRange(key string, def, lo, hi int32) (int32, bool) {
+// intRange парсит целое и проверяет диапазон [lo, hi]. Признака
+// валидности нет: кросс-полевых инвариантов у целых настроек пока нет.
+func (l *loader) intRange(key string, def, lo, hi int32) int32 {
 	s, ok := l.lookup(key)
 	if !ok {
-		return def, true
+		return def
 	}
 	if s == "" {
 		l.fail(key, errEmpty)
-		return 0, false
+		return 0
 	}
 	n, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
 		l.fail(key, err)
-		return 0, false
+		return 0
 	}
 	if v := int32(n); v < lo || v > hi {
 		l.fail(key, fmt.Errorf("%d is out of range [%d, %d]", v, lo, hi))
-		return 0, false
+		return 0
 	}
-	return int32(n), true
+	return int32(n)
+}
+
+// origins разбирает список origin через запятую. Не задано — пустой список
+// (обязательность зависит от окружения — второй этап). Задано пустым —
+// ошибка, как у остальных переменных.
+//
+// Формат строгий: браузер присылает Origin в каноническом виде (нижний
+// регистр, без пути и порта по умолчанию), а сравнение — точное. Любое
+// отклонение в конфиге означало бы origin, который никогда не совпадёт.
+func (l *loader) origins(key string) (Origins, bool) {
+	s, ok := l.lookup(key)
+	if !ok {
+		return Origins{}, true
+	}
+	if s == "" {
+		l.fail(key, errEmpty)
+		return Origins{}, false
+	}
+	var list []string
+	for _, raw := range strings.Split(s, ",") {
+		o := strings.TrimSpace(raw)
+		if err := checkOrigin(o); err != nil {
+			l.fail(key, err)
+			return Origins{}, false
+		}
+		if slices.Contains(list, o) {
+			l.fail(key, fmt.Errorf("duplicate origin %q", o))
+			return Origins{}, false
+		}
+		list = append(list, o)
+	}
+	return Origins{joined: strings.Join(list, ",")}, true
+}
+
+// prefixes разбирает список CIDR через запятую. Адрес без маски и
+// немаскированный префикс (10.0.0.1/8) — ошибка: запись должна однозначно
+// читаться как сеть.
+func (l *loader) prefixes(key string) (Prefixes, bool) {
+	s, ok := l.lookup(key)
+	if !ok {
+		return Prefixes{}, true
+	}
+	if s == "" {
+		l.fail(key, errEmpty)
+		return Prefixes{}, false
+	}
+	var list []string
+	for _, raw := range strings.Split(s, ",") {
+		v := strings.TrimSpace(raw)
+		p, err := netip.ParsePrefix(v)
+		if err != nil {
+			l.fail(key, fmt.Errorf("%q is not a CIDR (use /32 or /128 for a single address)", v))
+			return Prefixes{}, false
+		}
+		if p.Masked() != p {
+			l.fail(key, fmt.Errorf("%q has host bits set; did you mean %s?", v, p.Masked()))
+			return Prefixes{}, false
+		}
+		list = append(list, p.String())
+	}
+	return Prefixes{joined: strings.Join(list, ",")}, true
+}
+
+func checkOrigin(o string) error {
+	if o == "" {
+		return errors.New("empty origin in the list")
+	}
+	if o == "*" || o == "null" {
+		return fmt.Errorf("origin %q is not allowed: with credentials only exact origins are valid", o)
+	}
+	u, err := url.Parse(o)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.HasSuffix(o, "/") {
+		return fmt.Errorf("origin %q must be scheme://host[:port] without path, query or trailing slash", o)
+	}
+	if o != strings.ToLower(o) {
+		return fmt.Errorf("origin %q must be lowercase: browsers send origins in lowercase", o)
+	}
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		return fmt.Errorf("origin %q: drop the default port, browsers omit it", o)
+	}
+	return nil
 }
 
 func (l *loader) logLevel(key, def string) (slog.Level, bool) {

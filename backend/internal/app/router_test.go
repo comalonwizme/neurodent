@@ -2,19 +2,25 @@ package app // white-box: newRouter и registerRoutes намеренно не э
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/comalonwizme/neurodent/backend/internal/platform/clientip"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/logger"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/ratelimit"
+	"github.com/comalonwizme/neurodent/backend/internal/shared/clock"
+	"github.com/comalonwizme/neurodent/backend/internal/transport/http/middleware"
 )
 
 type syncBuffer struct {
@@ -53,13 +59,24 @@ const (
 
 // testRouter — боевая цепочка и боевые маршруты плюс тестовые хендлеры,
 // которые паникуют, зависают и читают тело.
+// denyAll — лимитер, который отказывает всем: кейс 429 в тестах цепочки.
+type denyAll struct{}
+
+func (denyAll) Allow(context.Context, ratelimit.Policy, ratelimit.Key) (ratelimit.Decision, error) {
+	return ratelimit.Decision{RetryAfter: 30 * time.Second}, nil
+}
+
 func testRouter(t *testing.T, handlerTimeout time.Duration) (http.Handler, *syncBuffer) {
+	return testRouterWith(t, handlerTimeout, ratelimit.NewMemory(clock.Real(), 1000))
+}
+
+func testRouterWith(t *testing.T, handlerTimeout time.Duration, limiter ratelimit.Limiter) (http.Handler, *syncBuffer) {
 	t.Helper()
 	logs := &syncBuffer{}
 	log := logger.New(logs, slog.LevelDebug, logger.FormatJSON)
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, health.NewProbe(log))
+	registerRoutes(mux, log, health.NewProbe(log))
 	mux.HandleFunc("GET /panic", func(http.ResponseWriter, *http.Request) { panic("boom") })
 	mux.HandleFunc("GET /partial-panic", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"partial":`)
@@ -76,8 +93,27 @@ func testRouter(t *testing.T, handlerTimeout time.Duration) (http.Handler, *sync
 		_ = httpx.WriteJSON(w, http.StatusOK, v)
 	})
 
-	return newRouter(mux, log, routerOptions{handlerTimeout: handlerTimeout, hsts: true}), logs
+	h, err := newRouter(mux, log, routerOptions{
+		handlerTimeout: handlerTimeout,
+		hsts:           true,
+		corsOrigins:    []string{testOrigin},
+		rateLimit: middleware.RateLimitOptions{
+			Limiter:  limiter,
+			Secret:   []byte("router-test-secret-0123456789abcd"),
+			Anon:     ratelimit.Policy{Name: "anon.ip", Limit: 1000, Window: time.Minute},
+			User:     ratelimit.Policy{Name: "user", Limit: 1000, Window: time.Minute},
+			Resolver: clientip.NewResolver(nil),
+			Exempt:   []string{"/healthz", "/readyz"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, logs
 }
+
+// testOrigin — разрешённый origin браузерного клиента в тестах роутера.
+const testOrigin = "https://app.neurodent.example"
 
 var securityHeaders = map[string]string{
 	"X-Content-Type-Options":    "nosniff",
@@ -100,6 +136,8 @@ func TestRouter_ErrorResponsesAreUniform(t *testing.T) {
 		code    string
 		route   string
 		timeout time.Duration // 0 — timeoutLong
+		foreign bool          // запрос с чужого origin: CORS-заголовков быть не должно
+		limited bool          // лимитер отказывает всем
 	}{
 		{
 			name:   "router 404",
@@ -136,6 +174,23 @@ func TestRouter_ErrorResponsesAreUniform(t *testing.T) {
 			status: 503, code: "unavailable", route: "GET /slow", timeout: timeoutShort,
 		},
 		{
+			// CSRF: небезопасный браузерный запрос с чужого origin.
+			name: "cross-origin write rejected",
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(`{}`))
+				r.Header.Set("Content-Type", "application/json")
+				r.Header.Set("Origin", "https://blog.neurodent.example")
+				r.Header.Set("Sec-Fetch-Site", "same-site")
+				return r
+			},
+			status: 403, code: "forbidden", route: "POST /echo", foreign: true,
+		},
+		{
+			name:   "rate limited",
+			req:    func() *http.Request { return httptest.NewRequest(http.MethodGet, "/nope", nil) },
+			status: 429, code: "rate_limited", route: "unmatched", limited: true,
+		},
+		{
 			name:   "panic",
 			req:    func() *http.Request { return httptest.NewRequest(http.MethodGet, "/panic", nil) },
 			status: 500, code: "internal", route: "GET /panic",
@@ -155,9 +210,17 @@ func TestRouter_ErrorResponsesAreUniform(t *testing.T) {
 			if timeout == 0 {
 				timeout = timeoutLong
 			}
-			h, logs := testRouter(t, timeout)
+			var limiter ratelimit.Limiter = ratelimit.NewMemory(clock.Real(), 1000)
+			if tt.limited {
+				limiter = denyAll{}
+			}
+			h, logs := testRouterWith(t, timeout, limiter)
 			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, tt.req())
+			req := tt.req()
+			if req.Header.Get("Origin") == "" {
+				req.Header.Set("Origin", testOrigin)
+			}
+			h.ServeHTTP(rec, req)
 
 			if rec.Code != tt.status {
 				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.status, rec.Body.String())
@@ -177,6 +240,11 @@ func TestRouter_ErrorResponsesAreUniform(t *testing.T) {
 				if got := rec.Header().Get(k); got != v {
 					t.Errorf("%s = %q, want %q", k, got, v)
 				}
+			}
+			// Без CORS-заголовков браузер не покажет клиенту даже текст ошибки.
+			checkCORS(t, rec, !tt.foreign)
+			if tt.limited && rec.Header().Get("Retry-After") != "30" {
+				t.Errorf("Retry-After = %q, want 30", rec.Header().Get("Retry-After"))
 			}
 
 			var access map[string]any
@@ -260,8 +328,13 @@ func TestRouter_Head(t *testing.T) {
 func TestRouter_NoHSTSInDev(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	registerRoutes(mux, health.NewProbe(log))
-	h := newRouter(mux, log, routerOptions{handlerTimeout: time.Second, hsts: false})
+	registerRoutes(mux, log, health.NewProbe(log))
+	h, err := newRouter(mux, log, routerOptions{handlerTimeout: time.Second, hsts: false,
+		rateLimit: middleware.RateLimitOptions{Limiter: ratelimit.NewMemory(clock.Real(), 10), Resolver: clientip.NewResolver(nil),
+			Anon: ratelimit.Policy{Name: "anon.ip", Limit: 100, Window: time.Minute}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -279,4 +352,80 @@ func TestRouter_CleanPathRedirectPreserved(t *testing.T) {
 	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "/nope" {
 		t.Errorf("got %d Location=%q, want 307 to /nope", rec.Code, rec.Header().Get("Location"))
 	}
+}
+
+// checkCORS проверяет CORS-заголовки ответа на запрос с Origin.
+func checkCORS(t *testing.T, rec *httptest.ResponseRecorder, allowed bool) {
+	t.Helper()
+	h := rec.Header()
+	if !slices.Contains(h.Values("Vary"), "Origin") {
+		t.Errorf("Vary = %v, want Origin", h.Values("Vary"))
+	}
+	if !allowed {
+		if got := h.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("foreign origin got Access-Control-Allow-Origin %q", got)
+		}
+		return
+	}
+	want := map[string]string{
+		"Access-Control-Allow-Origin":      testOrigin,
+		"Access-Control-Allow-Credentials": "true",
+		"Access-Control-Expose-Headers":    "X-Request-ID, Retry-After",
+	}
+	for k, v := range want {
+		if got := h.Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+func TestRouter_Preflight(t *testing.T) {
+	preflight := func(origin, method string) *http.Request {
+		r := httptest.NewRequest(http.MethodOptions, "/echo", nil)
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Access-Control-Request-Method", method)
+		r.Header.Set("Access-Control-Request-Headers", "content-type")
+		return r
+	}
+
+	t.Run("allowed origin gets 204 without the handler", func(t *testing.T) {
+		h, logs := testRouter(t, timeoutLong)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, preflight(testOrigin, http.MethodPost))
+		if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+			t.Fatalf("got %d %q, want 204 empty", rec.Code, rec.Body.String())
+		}
+		for k, v := range map[string]string{
+			"Access-Control-Allow-Origin":      testOrigin,
+			"Access-Control-Allow-Credentials": "true",
+			"Access-Control-Allow-Methods":     "GET, HEAD, POST, PUT, PATCH, DELETE",
+			"Access-Control-Allow-Headers":     "Content-Type, X-Request-ID",
+			"Access-Control-Max-Age":           "7200",
+		} {
+			if got := rec.Header().Get(k); got != v {
+				t.Errorf("%s = %q, want %q", k, got, v)
+			}
+		}
+		var route any
+		for _, r := range logs.records(t) {
+			if r["msg"] == "http request" {
+				route = r["route"]
+			}
+		}
+		if route != "preflight" {
+			t.Errorf("access log route = %v, want preflight", route)
+		}
+	})
+
+	t.Run("foreign origin gets 403 without CORS headers", func(t *testing.T) {
+		h, _ := testRouter(t, timeoutLong)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, preflight("https://evil.example", http.MethodPost))
+		if rec.Code != http.StatusForbidden || rec.Header().Get("Content-Type") != "application/problem+json" {
+			t.Errorf("got %d %s", rec.Code, rec.Header().Get("Content-Type"))
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q on a rejected preflight", got)
+		}
+	})
 }

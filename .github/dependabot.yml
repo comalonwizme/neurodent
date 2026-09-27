@@ -1,0 +1,39 @@
+# Обновления зависимостей. Экшены закреплены по SHA (ci.yml): Dependabot
+# обновляет SHA и комментарий с тегом. Обновления группируются, чтобы
+# не плодить десятки PR; CI (govulncheck, тесты) проверяет каждый.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Прод-зависимости бэкенда.
+  - package-ecosystem: gomod
+    directory: /backend
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # Инструменты кодогенерации (oapi-codegen, sqlc): отдельный модуль, отдельные
+  # PR. После обновления нужен make generate — шаг CI это проверит.
+  - package-ecosystem: gomod
+    directory: /backend/tools
+    schedule:
+      interval: monthly
+    groups:
+      tools:
+        patterns: ["*"]
+
+  # Образ Postgres в docker-compose.yml (закреплён по digest). Тот же образ
+  # задан в tests/integration/env_test.go: тест сверяет строки, так что PR
+  # Dependabot упадёт, пока константу не обновят в том же PR.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

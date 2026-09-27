@@ -15,6 +15,9 @@ type RouteMatcher interface {
 // routeUnmatched пишется вместо шаблона, если маршрут не найден.
 const routeUnmatched = "unmatched"
 
+// routePreflight пишется для CORS preflight.
+const routePreflight = "preflight"
+
 // AccessLog пишет одну строку на запрос: метод, шаблон маршрута, статус,
 // длительность, размер ответа; request_id приходит из контекста.
 //
@@ -53,6 +56,11 @@ func routeOf(routes RouteMatcher, r *http.Request) string {
 	// Маршрутов CONNECT у API нет, путь в лог не пускаем.
 	if r.Method == http.MethodConnect {
 		return routeUnmatched
+	}
+	// Preflight отвечает CORS-middleware, маршрута у него нет; отдельная
+	// метка, чтобы не путать с 404.
+	if isPreflight(r) {
+		return routePreflight
 	}
 	if _, pattern := routes.Handler(r); pattern != "" {
 		return pattern

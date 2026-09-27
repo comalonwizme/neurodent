@@ -1,8 +1,8 @@
 # 0015. CORS, защита от CSRF и порядок middleware
 
-- Статус: Предложено
+- Статус: Принято (после ревью, 2026-09-27)
 - Дата: 2026-09-27
-- Заменяет: [0009](0009-middleware-order.md) (после принятия 0009 получает статус «Заменён 0015»)
+- Заменяет: [0009](0009-middleware-order.md)
 - Связанные: 0005 (сессии), 0006 (RFC 9457), 0016 (rate limit)
 
 ## Контекст
@@ -37,7 +37,7 @@ security-заголовки и CORS-заголовки. Без CORS-заголо
 ### Порядок (снаружи внутрь)
 
 ```
-RequestID → AccessLog → SecurityHeaders → Recover → CORS → CrossOrigin → RateLimit → BodyLimit → Timeout → routeProblems(mux)
+RequestID → AccessLog → SecurityHeaders → Recover → CORS → CrossOrigin → [Auth] → RateLimit → BodyLimit → Timeout → routeProblems(mux)
 ```
 
 | Слой | Почему здесь |
@@ -45,10 +45,11 @@ RequestID → AccessLog → SecurityHeaders → Recover → CORS → CrossOrigin
 | RequestID | id нужен всем ниже: логам паник, access-логу, телам ошибок |
 | AccessLog | снаружи всех, кто пишет ответ сам: видит итоговый статус (403, 413, 429, 500, 503) и полную длительность |
 | SecurityHeaders | заголовки ставятся до любого ответа |
-| Recover | снаружи всех слоёв с логикой (CORS, CrossOrigin, RateLimit, Timeout); снаружи — только простые обёртки |
+| Recover | снаружи всех слоёв с логикой (CORS, CrossOrigin, Auth, RateLimit, Timeout); снаружи — только простые обёртки |
 | CORS | внутри Recover, но до всех, кто пишет ответ: CORS-заголовки ставятся в общую карту заголовков раньше, чем кто-то ответит (даже 500 от Recover). Preflight отвечает сам, не доходя до хендлера и rate limit |
-| CrossOrigin (CSRF) | после CORS: preflight уже отвечен; до RateLimit: отвергнутая подделка не тратит лимит |
-| RateLimit (по IP) | до BodyLimit и Timeout: 429 без чтения тела и без goroutine хендлера |
+| CrossOrigin (CSRF) | после CORS: preflight уже отвечен; до Auth и RateLimit: отвергнутая подделка не ищет сессию и не тратит лимит |
+| [Auth] | место зарезервировано для IAM: определяет, кто клиент. Стоит до RateLimit, потому что ключ лимита зависит от этого (0016) |
+| RateLimit | до BodyLimit и Timeout: 429 без чтения тела и без goroutine хендлера. Ключ — пользователь для аутентифицированных запросов, IP для анонимных (0016) |
 | BodyLimit | до Timeout: 413 по Content-Length без запуска goroutine |
 | Timeout | ближе всех к хендлеру: бюджет тратится только на хендлер |
 | routeProblems | 404/405 роутера в формате RFC 9457 |
@@ -128,8 +129,8 @@ middleware, без хендлера.
 - **CORS стоит внутри Recover**, а не снаружи. Заголовки всё равно есть
   на 500: Recover пишет в ту же карту заголовков, а паника в логике CORS
   даёт чистый 500, а не обрыв соединения.
-- **Место RateLimit зафиксировано здесь же.** Иначе 0016 пришлось бы
-  снова заменять таблицу порядка.
+- **Места RateLimit и будущей аутентификации (Auth) зафиксированы здесь
+  же.** Иначе 0016 и ADR IAM пришлось бы снова заменять таблицу порядка.
 - **`Access-Control-Expose-Headers`** для `X-Request-ID` и `Retry-After`.
 - **Пустой список origin — ошибка и в staging**, не только в prod.
 

@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/comalonwizme/neurodent/backend/internal/gen/platformapi"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpx"
 	"github.com/comalonwizme/neurodent/backend/internal/shared/apperr"
 )
@@ -234,5 +236,67 @@ func TestWriteProblem_WithoutRequestIDOmitsField(t *testing.T) {
 	httpx.WriteProblem(rec, r, http.StatusNotFound, "not_found", "")
 	if strings.Contains(rec.Body.String(), "request_id") || strings.Contains(rec.Body.String(), "detail") {
 		t.Errorf("empty optional fields must be omitted: %s", rec.Body.String())
+	}
+}
+
+// Ошибки параметров — те самые типы, что генерирует oapi-codegen.
+func TestParamErrorHandler(t *testing.T) {
+	const secret = "Иванов-850101300123"
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"invalid format", &platformapi.InvalidParamFormatError{ParamName: "id", Err: errors.New("invalid UUID '" + secret + "'")}, `parameter "id" is invalid`},
+		{"required", &platformapi.RequiredParamError{ParamName: "clinic_id"}, `parameter "clinic_id" is required`},
+		{"required header", &platformapi.RequiredHeaderError{ParamName: "X-Clinic", Err: errors.New("missing")}, `parameter "X-Clinic" is required`},
+		{"wrapped", fmt.Errorf("bind: %w", &platformapi.UnmarshalingParamError{ParamName: "filter", Err: errors.New(secret)}), `parameter "filter" is invalid`},
+		{"unknown error", errors.New("boom " + secret), "request parameters are invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			httpx.ParamErrorHandler(slog.New(slog.DiscardHandler))(rec, requestWithID("r1"), tt.err)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+			p := problemOf(t, rec)
+			if p.Detail != tt.want || p.Code != "invalid" || p.RequestID != "r1" {
+				t.Errorf("problem = %+v, want detail %q", p, tt.want)
+			}
+			if strings.Contains(rec.Body.String(), "850101300123") {
+				t.Errorf("parameter value echoed to the client: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+type retryAfterError struct{ d time.Duration }
+
+func (e retryAfterError) Error() string             { return "slow down" }
+func (e retryAfterError) RetryAfter() time.Duration { return e.d }
+
+func TestWriteError_RetryAfter(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "30"},
+		{1500 * time.Millisecond, "2"}, // вверх: раньше повторять бессмысленно
+		{0, "1"},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		err := apperr.Wrap(apperr.RateLimited, "too many requests", retryAfterError{tt.d})
+		httpx.WriteError(rec, requestWithID("r"), slog.New(slog.DiscardHandler), err)
+		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != tt.want {
+			t.Errorf("%s: status %d Retry-After %q, want 429 %q", tt.d, rec.Code, rec.Header().Get("Retry-After"), tt.want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	httpx.WriteError(rec, requestWithID("r"), slog.New(slog.DiscardHandler), apperr.New(apperr.RateLimited, ""))
+	if rec.Header().Get("Retry-After") != "" {
+		t.Error("Retry-After without a RetryAfter error")
 	}
 }

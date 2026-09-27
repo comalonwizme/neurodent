@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/comalonwizme/neurodent/backend/internal/config"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/clientip"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/health"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/httpserver"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/logger"
 	"github.com/comalonwizme/neurodent/backend/internal/platform/postgres"
+	"github.com/comalonwizme/neurodent/backend/internal/platform/ratelimit"
+	"github.com/comalonwizme/neurodent/backend/internal/shared/clock"
+	"github.com/comalonwizme/neurodent/backend/internal/transport/http/middleware"
 )
 
 // App — собранное приложение: конфиг, логгер, HTTP-сервер и ресурсы,
@@ -32,6 +36,11 @@ type App struct {
 	// Первый — пул Postgres: он закрывается после остановки HTTP-сервера.
 	closers []io.Closer
 }
+
+// rateLimitMaxKeys — сколько клиентов лимитер в памяти отслеживает
+// одновременно. Запись — десятки байт: 100 тысяч ключей — единицы МБ на
+// реплику, с запасом на пик одновременных клиентов (ADR-0016).
+const rateLimitMaxKeys = 100_000
 
 // New собирает приложение. Если сборка падает на середине, уже созданные
 // ресурсы закрываются (именованный err + defer).
@@ -67,11 +76,24 @@ func New(ctx context.Context, cfg config.Config, logOut io.Writer) (a *App, err 
 	a.probe = health.NewProbe(a.log, health.Check{Name: "postgres", Fn: db.Ping})
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, a.probe)
-	handler := newRouter(mux, a.log, routerOptions{
+	registerRoutes(mux, a.log, a.probe)
+	handler, err := newRouter(mux, a.log, routerOptions{
 		handlerTimeout: cfg.HandlerTimeout,
 		hsts:           cfg.Env != config.EnvDev,
+		corsOrigins:    cfg.CORSAllowedOrigins.List(),
+		rateLimit: middleware.RateLimitOptions{
+			Limiter:  ratelimit.NewMemory(clock.Real(), rateLimitMaxKeys),
+			Secret:   []byte(cfg.RateLimitKey.Reveal()),
+			Anon:     ratelimit.Policy{Name: "anon.ip", Limit: int(cfg.RateLimitAnonPerMin), Window: time.Minute},
+			User:     ratelimit.Policy{Name: "user", Limit: int(cfg.RateLimitUserPerMin), Window: time.Minute},
+			Resolver: clientip.NewResolver(cfg.TrustedProxies.List()),
+			Exempt:   []string{"/healthz", "/readyz"},
+			// Principal появится вместе с аутентификацией IAM.
+		},
 	})
+	if err != nil {
+		return nil, fmt.Errorf("router: %w", err)
+	}
 
 	a.server = httpserver.New(httpserver.Options{
 		Addr:              cfg.HTTPAddr,

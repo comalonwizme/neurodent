@@ -19,14 +19,14 @@ ADR фиксирует значимое решение: контекст, сам
 | [0006](0006-error-format-rfc9457.md) | Формат ошибок API: RFC 9457 | Принято |
 | [0007](0007-postgres-driver-pgx.md) | Драйвер Postgres: pgx v5 | Принято |
 | [0008](0008-embedded-migrator.md) | Миграции: свой мигратор на go:embed | Принято |
-| [0009](0009-middleware-order.md) | Порядок HTTP middleware | Принято |
+| [0009](0009-middleware-order.md) | Порядок HTTP middleware | Заменён 0015 |
 | [0010](0010-configuration-and-secrets.md) | Конфигурация и секреты | Принято |
-| [0011](0011-identity-clinics-cells-table-classes.md) | Идентичность, клиники, ячейки, классы таблиц | Предложено |
-| [0012](0012-module-template-and-cross-module-transactions.md) | Шаблон модуля и транзакции между модулями | Предложено |
-| [0013](0013-code-generation-openapi-and-sql.md) | Кодогенерация: OpenAPI и SQL | Предложено |
-| [0014](0014-audit-log.md) | Журнал аудита | Предложено |
-| [0015](0015-cors-csrf-and-middleware-order.md) | CORS, защита от CSRF и порядок middleware | Предложено (заменит 0009) |
-| [0016](0016-rate-limiting-and-trusted-proxies.md) | Rate limiting и доверенные прокси | Предложено |
+| [0011](0011-identity-clinics-cells-table-classes.md) | Идентичность, клиники, ячейки, классы таблиц | Принято |
+| [0012](0012-module-template-and-cross-module-transactions.md) | Шаблон модуля и транзакции между модулями | Принято |
+| [0013](0013-code-generation-openapi-and-sql.md) | Кодогенерация: OpenAPI и SQL | Принято |
+| [0014](0014-audit-log.md) | Журнал аудита | Принято |
+| [0015](0015-cors-csrf-and-middleware-order.md) | CORS, защита от CSRF и порядок middleware | Принято (заменяет 0009) |
+| [0016](0016-rate-limiting-and-trusted-proxies.md) | Rate limiting и доверенные прокси | Принято |
 
 ## Шаблон
 
